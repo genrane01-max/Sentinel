@@ -619,18 +619,21 @@ class InnovestXTradingBot:
                 time.sleep(1)
 
         logger.info("บอทหยุดทำงานเรียบร้อย (state ถูกบันทึกแล้ว)")
-        
-        # ==================== Web Service Dummy Port (สำหรับ Render) ====================
+
+
+# ==================== Web Service Dummy Port (สำหรับ Render) ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bot is running!")
 
+
 def start_dummy_health_check_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
+
 
 if __name__ == "__main__":
     api_key = os.environ.get("INVX_API_KEY")
@@ -640,6 +643,10 @@ if __name__ == "__main__":
             "กรุณาตั้งค่า environment variable INVX_API_KEY และ INVX_API_SECRET ก่อนรัน "
             "(ห้าม hardcode API key/secret ลงในไฟล์โค้ดโดยเด็ดขาด)"
         )
+
+    # เปิด Server จำลองหลอก Render ให้ตรวจเจอ Port
+    health_thread = threading.Thread(target=start_dummy_health_check_server, daemon=True)
+    health_thread.start()
 
     bot = InnovestXTradingBot(api_key=api_key, api_secret=api_secret, symbol="BTCTHB")
     bot.run(poll_interval_sec=60)
