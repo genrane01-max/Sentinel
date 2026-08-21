@@ -511,7 +511,7 @@ class InnovestXTradingBot:
                 logger.info(f"⏸ ราคาย่อถึง trailing threshold แต่ยังไม่คุ้มค่าธรรมเนียม "
                             f"(breakeven {breakeven_price:.2f}) ถือต่อ")
 
-    def sell_position(self, qty):
+    def sell_position(self, qty, current_price=None):
         _, coin_free, has_pending = self.get_free_balance()
         if has_pending:
             logger.info("ข้ามการขาย: มีออเดอร์ค้างอยู่ในระบบ")
