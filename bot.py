@@ -1,24 +1,35 @@
 """
-InnovestX Automated Trading Bot — Price Action 3H Strategy (v2, hardened)
+InnovestX Automated Trading Bot — Price Action 3H Strategy (v3, dashboard + control)
 
-แก้ไขจากโค้ดต้นฉบับตามที่รีวิวไว้:
-  1. เก็บ price_history จริง (เดิมไม่มีโค้ดสะสมราคาเลย ทำให้เงื่อนไขซื้อไม่มีวันครบ)
-  2. คำนวณค่าธรรมเนียม (fee) เข้าไปในจุดตัดสินใจขาย ไม่ให้ trailing stop ขายทั้งที่ขาดทุนสุทธิ
-  3. จัดการ error code เฉพาะทาง (4005 / 4011 / 4019 / 4042) + retry/backoff เมื่อเจอ network error, 429, 5xx
-  4. ยืนยันราคาจับคู่จริงด้วย retry-poll แทนการ sleep(3) แบบตายตัว
-  5. Circuit breaker: หยุดเทรดอัตโนมัติเมื่อขาดทุนสะสมรายวันเกินเพดาน หรือขาดทุนติดกันหลายไม้
-  6. Log ทุก request-uid ลงไฟล์ (bot_transactions.log) ตาม Architect's Tip ในคู่มือ
-  7. ใช้ Decimal ปัดจำนวนเหรียญตาม quantityIncrement จริง (กันปัญหาความแม่นยำของ float)
-  8. เช็ค minimum notional ก่อนส่งคำสั่งซื้อ
-  9. Graceful shutdown (Ctrl+C / SIGTERM) จะบันทึก state ก่อนปิดเสมอ
-  10. requests มี timeout ทุกครั้ง กัน bot ค้างถ้า network แขวน
+สืบเนื่องจาก v2 (hardened) เดิม เพิ่มเติมในเวอร์ชันนี้:
 
-⚠️ สมมติฐานที่ต้องตรวจสอบกับเอกสาร API ฉบับเต็มก่อนรันจริง (ผมไม่มีข้อมูลยืนยัน 100%):
-  - FEE_ESTIMATE_PATH ด้านล่าง: คู่มือพูดถึงฟีเจอร์ "Get Estimate Fee" แต่ไม่ได้ให้ path
-    ตรงๆ ผมตั้งตาม naming convention ของ endpoint อื่นๆ ที่คุณมีอยู่แล้ว — ต้องยืนยันก่อนใช้จริง
-  - get_latest_price(): คู่มือเรียก ticker ว่า "Subscribe" และบอกว่า "ส่งข้อมูลทุก 1 นาที"
-    ซึ่งฟังดูเหมือน WebSocket push มากกว่า REST request/response ปกติ ถ้า endpoint นี้ใช้ไม่ได้
-    แบบ REST จริง ให้เปลี่ยนมาใช้ WebSocket client แทนการ poll ในฟังก์ชันนี้
+1. หน้าเว็บ (/) เปลี่ยนจาก "Bot is running!" ธรรมดา เป็นแดชบอร์ดสไตล์ Claude AI
+   แสดงสถานะสด, ราคาปัจจุบัน, กำไร/ขาดทุน, และแถบสะสมข้อมูล 2 ชม.
+2. เลือกเหรียญที่จะเทรดได้จากหน้าเว็บ (จะสลับจริงก็ต่อเมื่อบอทไม่ได้ถือโพซิชันอยู่
+   — ถ้าถืออยู่ คำขอจะรอคิวจนกว่าจะขายเสร็จ เพื่อไม่ให้ตกหล่นการติดตามโพซิชันเดิม)
+3. ปุ่มหยุด/เริ่มเทรดต่อจากหน้าเว็บ (หยุด = ไม่เปิดออเดอร์ใหม่ แต่ไม่ได้บังคับขายของที่ถืออยู่)
+4. ตั้งรหัสผ่านป้องกันหน้าควบคุมได้ผ่าน ENV DASHBOARD_PASSWORD (แนะนำให้ตั้ง เพราะ URL นี้เปิดสู่สาธารณะ)
+5. เพิ่ม ENV SYMBOL (ไม่บังคับ) ใช้กำหนดเหรียญเริ่มต้นตอน deploy ครั้งแรก
+   หลังจากนั้นค่าที่ใช้จริงจะอ้างอิงจาก Firebase (bots_control/active_symbol) เป็นหลัก
+
+ของเดิมจาก v2 (ยังอยู่ครบ ไม่ได้ตัดออก):
+- price_history สะสมจริงจาก Firebase (ไม่หายตอน restart)
+- คำนวณค่าธรรมเนียมเข้าไปในจุดตัดสินใจขาย (breakeven check)
+- จัดการ error code เฉพาะทาง (4005 / 4011 / 4019 / 4042) + retry/backoff
+- ยืนยันราคาจับคู่จริงด้วย retry-poll แทนการ sleep(3) แบบตายตัว
+- Circuit breaker (ขาดทุนสะสมรายวันเกินเพดาน / ขาดทุนติดกันหลายไม้)
+- Log ทุก request-uid ลงไฟล์ bot_transactions.log
+- ใช้ Decimal ปัดจำนวนเหรียญตาม quantityIncrement จริง
+- เช็ค minimum notional ก่อนส่งคำสั่งซื้อ
+- Graceful shutdown (Ctrl+C / SIGTERM) บันทึก state ก่อนปิดเสมอ
+- requests มี timeout ทุกครั้ง
+
+⚠️ สมมติฐานที่ต้องตรวจสอบกับเอกสาร API ฉบับเต็มก่อนรันจริง (เหมือนเดิมจาก v2):
+- FEE_ESTIMATE_PATH ด้านล่าง: คู่มือพูดถึงฟีเจอร์ "Get Estimate Fee" แต่ไม่ได้ให้ path ตรงๆ
+  ผมตั้งตาม naming convention ของ endpoint อื่นที่มีอยู่แล้ว — ต้องยืนยันก่อนใช้จริง
+- get_latest_price(): คู่มือเรียก ticker ว่า "Subscribe" และบอกว่าส่งข้อมูลทุก 1 นาที
+  ฟังดูเหมือน WebSocket push มากกว่า REST request/response ปกติ ถ้า endpoint นี้ใช้ไม่ได้
+  แบบ REST จริง ให้เปลี่ยนมาใช้ WebSocket client แทนการ poll ในฟังก์ชันนี้
 """
 
 import time
@@ -27,12 +38,15 @@ import hmac
 import hashlib
 import json
 import os
+import re
 import signal
 import logging
+import threading
+import urllib.parse
+from string import Template
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 import firebase_admin
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from firebase_admin import credentials, db
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
@@ -49,11 +63,8 @@ logger = logging.getLogger("InnovestXBot")
 
 # ==================== Firebase (state persistence) ====================
 # Render (และ host อื่นๆ ส่วนใหญ่) ลบไฟล์ในดิสก์ทิ้งทุกครั้งที่ deploy ใหม่/restart/
-# free-tier sleep แล้วตื่น — ของเดิมเก็บ state (status, entry_price, quantity, ตัวนับ
-# circuit breaker ฯลฯ) ไว้ในไฟล์ bot_state.json บนดิสก์เฉยๆ พอ restart ทีนึงข้อมูลหายหมด
-# บอทจะคิดว่าตัวเองว่าง (IDLE) ทั้งที่จริงถือเหรียญอยู่ หรือลืมไปแล้วว่าวันนี้ HALTED เพราะ
-# ขาดทุนเกินเพดานไปแล้ว → ย้ายไปเก็บบน Firebase Realtime Database แทน ข้อมูลอยู่ถาวร
-# ไม่หายตอน restart
+# free-tier sleep แล้วตื่น — ของเดิมเก็บ state ไว้ในไฟล์บนดิสก์เฉยๆ พอ restart ข้อมูลหายหมด
+# → ย้ายไปเก็บบน Firebase Realtime Database แทน ข้อมูลอยู่ถาวร ไม่หายตอน restart
 def init_firebase():
     try:
         if not firebase_admin._apps:
@@ -64,54 +75,80 @@ def init_firebase():
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
 
+
 init_firebase()
+
+# ==================== การควบคุมบอทจากหน้าเว็บ ====================
+# เก็บที่ path "bot_control" (คนละอันกับ "bots/{symbol}/state" ที่เก็บสถานะการเทรดแต่ละเหรียญ)
+DEFAULT_SYMBOL = os.environ.get("SYMBOL", "BTCTHB").upper()
+
+# ตัวแปร global ให้ thread ของหน้าเว็บ (HTTP handler) รู้ว่าตอนนี้บอทกำลังรันเหรียญไหนอยู่จริงๆ
+# (ต่างจาก "active_symbol" ใน Firebase ซึ่งเป็นแค่คำขอ อาจยังไม่ถูก apply ถ้าบอทถือโพซิชันค้างอยู่)
+RUNNING_SYMBOL = {"value": DEFAULT_SYMBOL}
+
+
+def load_control():
+    """อ่านคำสั่งควบคุมล่าสุดจากหน้าเว็บ (เหรียญที่ต้องการ, หยุดชั่วคราวหรือไม่)"""
+    try:
+        data = db.reference("bot_control").get() or {}
+    except Exception as e:
+        logger.warning(f"อ่าน bot_control จาก Firebase ไม่ได้ ใช้ค่าเริ่มต้น: {e}")
+        data = {}
+    return {
+        "active_symbol": (data.get("active_symbol") or DEFAULT_SYMBOL).upper(),
+        "paused": bool(data.get("paused", False)),
+    }
+
+
+def save_control(control):
+    try:
+        db.reference("bot_control").set(control)
+    except Exception as e:
+        logger.error(f"บันทึก bot_control ไป Firebase ไม่สำเร็จ: {e}")
 
 
 class InnovestXTradingBot:
     # ---- ค่าคงที่ที่ปรับได้ ----
-    MAX_DAILY_LOSS_PERCENT = 5.0          # หยุดเทรดถ้าขาดทุนสะสมวันนี้เกิน % ของทุนเริ่มวัน
-    MAX_CONSECUTIVE_LOSSES = 3            # หยุดเทรดถ้าขาดทุนติดกันกี่ไม้
+    MAX_DAILY_LOSS_PERCENT = 5.0        # หยุดเทรดถ้าขาดทุนสะสมวันนี้เกิน % ของทุนเริ่มวัน
+    MAX_CONSECUTIVE_LOSSES = 3          # หยุดเทรดถ้าขาดทุนติดกันกี่ไม้
     DEFAULT_ROUNDTRIP_FEE_PERCENT = 0.50  # fallback ถ้าดึงค่าธรรมเนียมจริงไม่ได้ (ปรับให้ตรงจริง!)
     MIN_ORDER_THB = 100.0
-    MAX_ACCEPTABLE_SLIPPAGE_PERCENT = 1.0   # ถ้าราคาจริงเพี้ยนจากที่คาดเกิน % นี้ จะแจ้งเตือน
+    MAX_ACCEPTABLE_SLIPPAGE_PERCENT = 1.0  # ถ้าราคาจริงเพี้ยนจากที่คาดเกิน % นี้จะแจ้งเตือน
     REQUEST_TIMEOUT_SEC = 10
     MAX_RETRIES = 3
     FEE_ESTIMATE_PATH = "/api/v1/digital-asset/order/fee/inquiry"
 
     def __init__(self, api_key, api_secret, symbol="BTCTHB", base_currency="THB",
-                 target_currency="BTC", trailing_stop_percent=2.0, stop_loss_percent=1.5):
+                 target_currency=None, trailing_stop_percent=2.0, stop_loss_percent=1.5):
         self.api_key = api_key
         self.api_secret = api_secret
         self.symbol = symbol
         self.base_currency = base_currency
+        # เดา target_currency จาก symbol อัตโนมัติถ้าไม่ได้ระบุ (ตัด base_currency ท้าย symbol ออก)
+        if target_currency is None:
+            target_currency = symbol[:-len(base_currency)] if symbol.endswith(base_currency) else symbol
         self.target_currency = target_currency
         self.host = "api.innovestxonline.com"
         self.base_url = f"https://{self.host}"
-        # path ที่เก็บ state บน Firebase Realtime Database — แยกตาม symbol กันชนกันถ้า
-        # รันบอทหลายตัว/หลายเหรียญพร้อมกันในอนาคต (เดิมใช้ไฟล์ bot_state.json บนดิสก์
-        # ซึ่งหายทุกครั้งที่ Render restart — ดูคอมเมนต์ init_firebase() ด้านบน)
+        # path ที่เก็บ state บน Firebase — แยกตาม symbol กันชนกันถ้าเคยเทรดหลายเหรียญ
         self.state_path = f"bots/{symbol}/state"
-
         self.trailing_stop_percent = trailing_stop_percent
         self.stop_loss_percent = stop_loss_percent
-
         self._stop_requested = False
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
-
         self.state = self.load_state()
 
     # ==================== State management ====================
-
     def load_state(self):
         default_state = {
-            "status": "IDLE",            # IDLE / HOLDING / HALTED
+            "status": "IDLE",  # IDLE / HOLDING / HALTED
             "entry_price": 0.0,
             "highest_price": 0.0,
             "quantity": 0.0,
             "roundtrip_fee_percent": self.DEFAULT_ROUNDTRIP_FEE_PERCENT,
-            "price_history": [],         # [[timestamp_sec, price], ...] เก็บย้อนหลัง 3 ชม.
-            "trade_date": None,          # "YYYY-MM-DD" (UTC) สำหรับรีเซ็ต circuit breaker รายวัน
+            "price_history": [],  # [[timestamp_sec, price], ...] เก็บย้อนหลัง 3 ชม.
+            "trade_date": None,   # "YYYY-MM-DD" (UTC) สำหรับรีเซ็ต circuit breaker รายวัน
             "daily_start_balance": 0.0,
             "daily_realized_pnl": 0.0,
             "consecutive_losses": 0,
@@ -137,14 +174,13 @@ class InnovestXTradingBot:
         logger.info(f"ได้รับสัญญาณหยุด ({signum}) กำลังบันทึกสถานะก่อนปิดบอท...")
         self._stop_requested = True
         self.save_state()
-        
+
     def reconcile_state_on_startup(self):
-        """เช็คว่า state ใน state file ตรงกับยอดจริงในพอร์ตหรือไม่ ก่อนเริ่ม loop"""
-        logger.info("กำลังตรวจสอบสถานะกับยอดจริงในพอร์ต (Reconcile)...")
+        """เช็คว่า state ตรงกับยอดจริงในพอร์ตหรือไม่ ก่อนเริ่ม loop"""
+        logger.info(f"[{self.symbol}] กำลังตรวจสอบสถานะกับยอดจริงในพอร์ต (Reconcile)...")
         _, coin_free, _ = self.get_free_balance()
         rules = self.get_symbol_rules()
         dust_threshold = float(rules["quantity_increment"])
-
         if self.state["status"] == "HOLDING" and coin_free <= dust_threshold:
             logger.error(f"⚠️ RECONCILE MISMATCH: state บอก HOLDING แต่ในพอร์ตมีแค่ {coin_free} "
                          f"(อาจขายไปแล้วตอนบอทออฟไลน์) รีเซ็ตเป็น IDLE เพื่อความปลอดภัย")
@@ -156,10 +192,10 @@ class InnovestXTradingBot:
             self.state["status"] = "HALTED"
             self.save_state()
         else:
-            logger.info(f"Reconcile ผ่าน: state={self.state['status']} ตรงกับพอร์ตจริง ({coin_free} {self.target_currency})")
+            logger.info(f"Reconcile ผ่าน: state={self.state['status']} ตรงกับพอร์ตจริง "
+                        f"({coin_free} {self.target_currency})")
 
     # ==================== HTTP / signing ====================
-
     def send_request(self, method, path, query="", body=None, _retry_count=0):
         """ส่ง request พร้อม HMAC-SHA256 signature, timeout, retry/backoff และ audit log ต่อ request-uid"""
         url = self.base_url + path + query
@@ -167,7 +203,6 @@ class InnovestXTradingBot:
         timestamp = str(int(time.time() * 1000))
         request_uid = str(uuid.uuid4())
         content_type = "application/json"
-
         content_to_sign = (
             self.api_key + method.upper() + self.host + path + query +
             content_type + request_uid + timestamp + body_str
@@ -177,7 +212,6 @@ class InnovestXTradingBot:
             content_to_sign.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-
         headers = {
             "Content-Type": content_type,
             "X-INVX-REQUEST-UID": request_uid,
@@ -185,7 +219,6 @@ class InnovestXTradingBot:
             "X-INVX-SIGNATURE": signature,
             "X-INVX-APIKEY": self.api_key,
         }
-
         try:
             if method.upper() == "GET":
                 response = requests.get(url, headers=headers, timeout=self.REQUEST_TIMEOUT_SEC)
@@ -217,7 +250,6 @@ class InnovestXTradingBot:
 
         code = data.get("code")
         logger.info(f"[UID {request_uid}] {method} {path} -> code={code}")
-
         if code == "4005":
             logger.error(f"[UID {request_uid}] 4005 Invalid Signature — ตรวจสอบลำดับ string-to-sign และ API Secret")
         elif code == "4011":
@@ -227,11 +259,9 @@ class InnovestXTradingBot:
             logger.warning(f"[UID {request_uid}] 4019 Insufficient Balance")
         elif code == "4042":
             logger.warning(f"[UID {request_uid}] 4042 Symbol not found — ตรวจสอบ symbol '{self.symbol}'")
-
         return data
 
     # ==================== Market data / price history ====================
-
     def get_latest_price(self):
         path = "/api/v1/digital-asset/ticker/subscribe"
         body = {"symbol": self.symbol}
@@ -318,39 +348,26 @@ class InnovestXTradingBot:
             return value
 
     def estimate_roundtrip_fee_percent(self):
-            """พยายามดึงค่าธรรมเนียมจริงจาก API และคำนวณเป็นเปอร์เซ็นต์; ถ้าทำไม่ได้ให้ใช้ค่า default แทน"""
-            # 1. ปรับปรุงพารามิเตอร์ขาส่ง (Request) ตามคู่มือ InnovestX: บังคับส่ง symbol, amount, price, side (ไม่มี orderType)
-            dummy_amount = 0.01      # จำนวนเหรียญจำลองที่ใช้ทดสอบคำนวณ
-            dummy_price = 100000.0   # ราคาสมมติต่อหน่วย
-            total_value = dummy_amount * dummy_price  # มูลค่ารวมจำลอง (1,000 THB)
-            
-            body = {
-                "symbol": self.symbol,
-                "amount": dummy_amount,
-                "price": dummy_price,
-                "side": 0  # 0 = Buy (ฝั่งซื้อ)
-            }
-            
-            res = self.send_request("POST", self.FEE_ESTIMATE_PATH, body=body)
-            
-            if res and res.get("code") == "0000":
-                try:
-                    # 2. ปรับปรุงขาตอบกลับ (Response) ตามคู่มือ: ระบบส่งค่ากลับมาเป็น 'orderFee' (ค่าฟีดิบเป็นจำนวนเงิน) ไม่ใช่ 'feePercent'
-                    order_fee_str = res["data"].get("orderFee", "0")
-                    order_fee = float(order_fee_str)
-                    
-                    # 3. คำนวณอัตราค่าธรรมเนียมกลับเป็นเปอร์เซ็นต์จริง: (ค่าธรรมเนียมจริง / มูลค่าคำสั่งซื้อรวม) * 100
-                    if order_fee > 0 and total_value > 0:
-                        buy_fee_pct = (order_fee / total_value) * 100
-                        return buy_fee_pct * 2  # คูณ 2 เพื่อประมาณการค่าฟีแบบไป-กลับ (ซื้อ + ขาย)
-                except (KeyError, TypeError, ValueError) as e:
-                    logger.warning(f"เกิดข้อผิดพลาดในการคำนวณค่าธรรมเนียมจริง: {e}")
-                    
-            logger.warning(f"ดึงค่าธรรมเนียมจริงไม่ได้ ใช้ default {self.DEFAULT_ROUNDTRIP_FEE_PERCENT}% แทน (ควรตรวจสอบ FEE_ESTIMATE_PATH และพารามิเตอร์)")
-            return self.DEFAULT_ROUNDTRIP_FEE_PERCENT
+        """พยายามดึงค่าธรรมเนียมจริงจาก API และคำนวณเป็นเปอร์เซ็นต์; ถ้าทำไม่ได้ให้ใช้ค่า default แทน"""
+        dummy_amount = 0.01
+        dummy_price = 100000.0
+        total_value = dummy_amount * dummy_price
+        body = {"symbol": self.symbol, "amount": dummy_amount, "price": dummy_price, "side": 0}
+        res = self.send_request("POST", self.FEE_ESTIMATE_PATH, body=body)
+        if res and res.get("code") == "0000":
+            try:
+                order_fee_str = res["data"].get("orderFee", "0")
+                order_fee = float(order_fee_str)
+                if order_fee > 0 and total_value > 0:
+                    buy_fee_pct = (order_fee / total_value) * 100
+                    return buy_fee_pct * 2  # คูณ 2 เพื่อประมาณการค่าฟีแบบไป-กลับ (ซื้อ + ขาย)
+            except (KeyError, TypeError, ValueError) as e:
+                logger.warning(f"เกิดข้อผิดพลาดในการคำนวณค่าธรรมเนียมจริง: {e}")
+        logger.warning(f"ดึงค่าธรรมเนียมจริงไม่ได้ ใช้ default {self.DEFAULT_ROUNDTRIP_FEE_PERCENT}% แทน "
+                       f"(ควรตรวจสอบ FEE_ESTIMATE_PATH และพารามิเตอร์)")
+        return self.DEFAULT_ROUNDTRIP_FEE_PERCENT
 
     # ==================== Account ====================
-
     def get_free_balance(self):
         balance_res = self.send_request("GET", "/api/v1/digital-asset/account/balance/inquiry")
         thb_free = 0.0
@@ -373,28 +390,24 @@ class InnovestXTradingBot:
                 if order.get("symbol") == self.symbol and order.get("orderState") == "Working":
                     has_pending_orders = True
                     break
-
         return thb_free, coin_free, has_pending_orders
 
     # ==================== Orders ====================
-
     def execute_market_order(self, side, value=None, quantity=None):
         if side == 0 and value is not None and value < self.MIN_ORDER_THB:
             logger.warning(f"ยกเลิกคำสั่งซื้อ: มูลค่า {value} THB ต่ำกว่าขั้นต่ำ {self.MIN_ORDER_THB} THB")
             return None
-
         path = "/api/v1/digital-asset/order/send"
         body = {"symbol": self.symbol, "timeInForce": 1, "side": side, "orderType": 1}
         if side == 0 and value is not None:
             body["value"] = round(value, 2)
         elif side == 1 and quantity is not None:
             body["quantity"] = quantity
-
         logger.info(f"กำลังส่งคำสั่งเทรด: {'ซื้อ' if side == 0 else 'ขาย'} -> {body}")
         return self.send_request("POST", path, body=body)
 
     def confirm_fill_price(self, order_id, max_attempts=5, delay_sec=1.5):
-        """Poll ยืนยันราคาเฉลี่ยที่ match จริง แทนการ sleep คงที่ (กัน matching engine ช้ากว่าที่คาด)"""
+        """Poll ยืนยันราคาเฉลี่ยที่ match จริง แทนการ sleep คงที่"""
         path = "/api/v1/digital-asset/order/history/inquiry"
         body = {"symbol": self.symbol, "orderId": order_id}
         for attempt in range(1, max_attempts + 1):
@@ -409,7 +422,7 @@ class InnovestXTradingBot:
             time.sleep(delay_sec)
         logger.warning(f"ไม่สามารถยืนยันราคาเฉลี่ยของ order {order_id} ได้หลัง {max_attempts} ครั้ง")
         return 0.0
-        
+
     def _check_slippage(self, expected_price, actual_price, context=""):
         if expected_price <= 0:
             return
@@ -419,9 +432,8 @@ class InnovestXTradingBot:
                          f"(ห่างกัน {slippage_percent:.2f}%) — ตลาดผันผวนหนักหรือสภาพคล่องบาง ควรตรวจสอบด้วยตา")
         else:
             logger.info(f"Slippage ({context}): {slippage_percent:.2f}%")
-    
-    # ==================== Circuit breaker ====================
 
+    # ==================== Circuit breaker ====================
     def _today_str(self):
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -464,7 +476,6 @@ class InnovestXTradingBot:
         self.save_state()
 
     # ==================== Strategy ====================
-
     def run_strategy(self, current_price):
         if self.state["status"] == "HALTED":
             return
@@ -486,7 +497,6 @@ class InnovestXTradingBot:
             rule_current_hour_green = current_price > price_open_1h
             logger.info(f"เทรนด์ 3ชม: {current_price} > {price_1h_ago} > {price_2h_ago} -> {rule_trend_up} | "
                         f"ชม.นี้เขียว: {current_price} > {price_open_1h} -> {rule_current_hour_green}")
-
             if not (rule_trend_up and rule_current_hour_green):
                 return
 
@@ -516,7 +526,6 @@ class InnovestXTradingBot:
 
             estimated_qty = self._floor_to_increment(buy_value / avg_price, rules["quantity_increment"])
             fee_pct = self.estimate_roundtrip_fee_percent()
-
             self.state.update({
                 "status": "HOLDING",
                 "entry_price": avg_price,
@@ -533,7 +542,6 @@ class InnovestXTradingBot:
             highest_price = self.state["highest_price"]
             qty = self.state["quantity"]
             fee_pct = self.state.get("roundtrip_fee_percent", self.DEFAULT_ROUNDTRIP_FEE_PERCENT)
-
             logger.info(f"สถานะ HOLDING ต้นทุน {entry_price} THB ราคาปัจจุบัน {current_price} THB")
 
             if current_price > highest_price:
@@ -561,11 +569,9 @@ class InnovestXTradingBot:
         if has_pending:
             logger.info("ข้ามการขาย: มีออเดอร์ค้างอยู่ในระบบ")
             return
-
         sell_qty = min(qty, coin_free)
         rules = self.get_symbol_rules()
         sell_qty = self._floor_to_increment(sell_qty, rules["quantity_increment"])
-
         if sell_qty <= 0:
             logger.warning(f"ไม่มียอดเหรียญ {self.target_currency} พร้อมขาย (คงเหลือจริง {coin_free})")
             return
@@ -579,54 +585,395 @@ class InnovestXTradingBot:
         sell_avg_price = self.confirm_fill_price(order_id)
         if sell_avg_price > 0 and current_price is not None:
             self._check_slippage(current_price, sell_avg_price, "ขาย")
+
         entry_price = self.state["entry_price"]
         pnl_thb = (sell_avg_price - entry_price) * sell_qty if sell_avg_price > 0 else 0.0
         if sell_avg_price == 0.0:
             logger.warning("ยืนยันราคาขายจริงไม่ได้ — ข้าม PnL tracking รอบนี้ (ตรวจสอบ order ด้วยมือ)")
-
         logger.info(f"✔ ขายสำเร็จ ราคาเฉลี่ย {sell_avg_price or 'N/A'} PnL รอบนี้ {pnl_thb:.2f} THB")
 
-        self.state.update({
-            "status": "IDLE",
-            "entry_price": 0.0,
-            "highest_price": 0.0,
-            "quantity": 0.0,
-        })
+        self.state.update({"status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
         self._register_trade_result(pnl_thb)
 
     # ==================== Main loop ====================
+    def run_once(self):
+        """รันหนึ่งรอบของ loop หลัก (ไม่ sleep) — เรียกจาก run() หรือจาก supervisor loop ใน __main__"""
+        self._maybe_reset_daily_counters()
+        if self.state["status"] == "HALTED":
+            logger.warning("⛔ บอทอยู่ในสถานะ HALTED จาก Circuit Breaker — เฝ้าดูอย่างเดียว ไม่ส่งคำสั่งใหม่")
+            return
+        price = self.get_latest_price()
+        if price is not None:
+            self._record_price_tick(price)
+            self.run_strategy(price)
 
     def run(self, poll_interval_sec=60):
+        """เรียกใช้ตรงๆ ได้ถ้าไม่ต้องการ dashboard control (เทรดเหรียญเดียวตลอด ไม่มีปุ่มหยุด)"""
         logger.info(f"เริ่มบอทเทรด {self.symbol} (poll ทุก {poll_interval_sec} วิ) — กด Ctrl+C เพื่อหยุดอย่างปลอดภัย")
         self.reconcile_state_on_startup()
         while not self._stop_requested:
             try:
-                self._maybe_reset_daily_counters()
-
-                if self.state["status"] == "HALTED":
-                    logger.warning("⛔ บอทอยู่ในสถานะ HALTED จาก Circuit Breaker — เฝ้าดูอย่างเดียว ไม่ส่งคำสั่งใหม่")
-                else:
-                    price = self.get_latest_price()
-                    if price is not None:
-                        self._record_price_tick(price)
-                        self.run_strategy(price)
+                self.run_once()
             except Exception:
                 logger.exception("เกิดข้อผิดพลาดไม่คาดคิดใน main loop — บอทจะพยายามทำงานต่อในรอบถัดไป")
-
             for _ in range(poll_interval_sec):
                 if self._stop_requested:
                     break
                 time.sleep(1)
-
         logger.info("บอทหยุดทำงานเรียบร้อย (state ถูกบันทึกแล้ว)")
 
 
-# ==================== Web Service Dummy Port (สำหรับ Render) ====================
+# ==================== Dashboard (หน้าเว็บสถานะ + ควบคุมบอท) ====================
+
+DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="refresh" content="30">
+<title>${symbol_display} Bot Dashboard</title>
+<style>
+  :root {
+    --bg: #F0EEE6; --card: #FFFFFF; --border: #E4E0D3;
+    --text: #2B2822; --text-soft: #86806F;
+    --accent: #D97757; --accent-soft: #F1DFD2;
+    --green: #5C8A6A; --green-soft: #E3EBDF;
+    --red: #C0574A; --red-soft: #F5DFDA;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased; min-height:100vh; display:flex; justify-content:center; padding:0 0 40px; }
+  .app { width:100%; max-width:480px; }
+  .topbar { position:sticky; top:0; z-index:10; display:flex; align-items:center; justify-content:space-between; padding:18px 20px; background:rgba(240,238,230,0.92); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); }
+  .brand { display:flex; align-items:center; gap:10px; }
+  .spark { width:22px; height:22px; flex-shrink:0; }
+  .spark path { fill: var(--accent); }
+  .brand-title { font-size:15px; font-weight:700; letter-spacing:-0.01em; }
+  .brand-sub { font-size:12px; color:var(--text-soft); margin-top:1px; }
+  .status-pill { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border-radius:999px; font-size:12px; font-weight:600; letter-spacing:0.02em; }
+  .status-holding { background:var(--green-soft); color:var(--green); }
+  .status-idle { background:#EDEBE1; color:var(--text-soft); }
+  .status-halted { background:var(--red-soft); color:var(--red); }
+  .dot { width:7px; height:7px; border-radius:50%; background:currentColor; }
+  .status-holding .dot { animation:pulse 1.8s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1);} 50%{opacity:.45;transform:scale(.8);} }
+  @media (prefers-reduced-motion:reduce){ .status-holding .dot{animation:none;} }
+  .hero { padding:32px 24px 20px; text-align:center; }
+  .hero-label { font-size:13px; color:var(--text-soft); font-weight:500; }
+  .hero-price { font-size:clamp(34px,9vw,44px); font-weight:800; letter-spacing:-0.02em; font-variant-numeric:tabular-nums; margin-top:4px; }
+  .hero-decimal { font-size:.55em; color:var(--text-soft); font-weight:700; }
+  .hero-delta { display:inline-block; margin-top:10px; font-size:13px; font-weight:600; padding:4px 10px; border-radius:999px; }
+  .hero-delta.positive { color:var(--green); background:var(--green-soft); }
+  .hero-delta.negative { color:var(--red); background:var(--red-soft); }
+  .hero-sub { margin-top:10px; font-size:13px; color:var(--text-soft); }
+  .banner { margin:0 20px 12px; padding:12px 14px; border-radius:12px; font-size:13px; font-weight:600; line-height:1.5; }
+  .banner-danger { background:var(--red-soft); color:var(--red); }
+  .banner-info { background:var(--accent-soft); color:var(--accent); }
+  .banner-warning { background:#F3E9CE; color:#8A6A1F; }
+  .progress-card { margin:0 20px 16px; background:var(--card); border:1px solid var(--border); border-radius:16px; padding:14px 16px; }
+  .progress-label { font-size:12px; color:var(--text-soft); font-weight:600; }
+  .progress-bar { margin-top:8px; height:8px; border-radius:999px; background:#EDEBE1; overflow:hidden; }
+  .progress-fill { height:100%; background:var(--accent); border-radius:999px; transition:width .3s ease; }
+  .progress-sub { margin-top:6px; font-size:12px; color:var(--text-soft); }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:0 20px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:16px; padding:14px 16px; box-shadow:0 1px 2px rgba(43,40,34,.03); }
+  .card-label { font-size:12px; color:var(--text-soft); font-weight:500; }
+  .card-value { font-size:17px; font-weight:700; margin-top:4px; font-variant-numeric:tabular-nums; letter-spacing:-0.01em; }
+  .card-value.positive { color:var(--green); }
+  .card-value.negative { color:var(--red); }
+  .card-value.accent { color:var(--accent); }
+  .card-sub { font-size:11px; color:var(--text-soft); margin-top:2px; }
+  .control { margin:20px 20px 0; background:var(--card); border:1px solid var(--border); border-radius:16px; padding:16px; }
+  .control-title { font-size:13px; font-weight:700; margin-bottom:12px; }
+  .control-row { display:flex; align-items:flex-end; gap:10px; margin-bottom:14px; }
+  .control-row:last-child { margin-bottom:0; }
+  .control-info { flex:1; min-width:0; }
+  .control-label { font-size:12px; font-weight:600; color:var(--text); }
+  .control-sub { font-size:11px; color:var(--text-soft); margin-top:2px; }
+  .symbol-input { width:100%; margin-top:8px; padding:9px 10px; border:1px solid var(--border); border-radius:10px; font-size:14px; font-weight:600; letter-spacing:.02em; text-transform:uppercase; background:var(--bg); color:var(--text); }
+  .symbol-input:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  .quick-picks { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .pick { font-size:11px; font-weight:600; color:var(--text-soft); background:var(--bg); border:1px solid var(--border); border-radius:999px; padding:4px 9px; cursor:pointer; }
+  .password-input { width:100%; margin-top:8px; padding:9px 10px; border:1px solid var(--border); border-radius:10px; font-size:13px; background:var(--bg); color:var(--text); }
+  .btn { border:none; border-radius:10px; padding:10px 16px; font-size:13px; font-weight:700; cursor:pointer; white-space:nowrap; }
+  .btn-accent { background:var(--accent); color:#fff; }
+  .btn-neutral { background:#EDEBE1; color:var(--text); }
+  .btn-danger { background:var(--red); color:#fff; }
+  footer { display:flex; align-items:center; justify-content:center; gap:8px; margin-top:20px; font-size:12px; color:var(--text-soft); }
+  .sep { opacity:.5; }
+  .refresh-link { color:var(--accent); text-decoration:none; font-weight:600; }
+</style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <svg class="spark" viewBox="0 0 24 24"><path d="M12 0c.6 3.8 2.2 6.4 5 8.2 2.8 1.8 5.4 2 7 2-1.6 0-4.2.2-7 2C14.2 14 12.6 16.6 12 20.4c-.6-3.8-2.2-6.4-5-8.2-2.8-1.8-5.4-2-7-2 1.6 0 4.2-.2 7-2C9.8 6.4 11.4 3.8 12 0z"/></svg>
+        <div>
+          <div class="brand-title">InnovestX Bot</div>
+          <div class="brand-sub">${symbol_display} · Price Action 3H</div>
+        </div>
+      </div>
+      <div class="status-pill ${status_class}"><span class="dot"></span> ${status_label}</div>
+    </header>
+
+    <section class="hero">
+      <div class="hero-label">ราคาปัจจุบัน (${symbol_display})</div>
+      <div class="hero-price">${hero_price}</div>
+      ${hero_delta_html}
+    </section>
+
+    ${banners_html}
+    ${progress_html}
+
+    <div class="grid">
+      ${cards_html}
+    </div>
+
+    <section class="control">
+      <div class="control-title">ควบคุมบอท</div>
+      <form class="control-row" method="POST" action="/control/pause">
+        <div class="control-info">
+          <div class="control-label">การเทรดอัตโนมัติ</div>
+          <div class="control-sub">${pause_sub}</div>
+        </div>
+        <button type="submit" class="btn ${pause_btn_class}">${pause_btn_label}</button>
+      </form>
+      <form class="control-row" method="POST" action="/control/symbol" style="flex-direction:column; align-items:stretch;">
+        <div class="control-info">
+          <div class="control-label">เหรียญที่เทรด (กำลังรัน: ${running_symbol})</div>
+          <input class="symbol-input" type="text" name="symbol" value="${symbol_input_value}" autocapitalize="characters" autocomplete="off">
+          <div class="quick-picks">
+            <span class="pick" onclick="document.querySelector('.symbol-input').value='BTCTHB'">BTCTHB</span>
+            <span class="pick" onclick="document.querySelector('.symbol-input').value='ETHTHB'">ETHTHB</span>
+            <span class="pick" onclick="document.querySelector('.symbol-input').value='XRPTHB'">XRPTHB</span>
+            <span class="pick" onclick="document.querySelector('.symbol-input').value='USDTTHB'">USDTTHB</span>
+          </div>
+          <div class="control-sub" style="margin-top:6px;">พิมพ์คู่เหรียญตามที่ InnovestX รองรับ (ตัวพิมพ์ใหญ่) เปลี่ยนได้จริงเมื่อบอทไม่ได้ถือโพซิชันอยู่เท่านั้น</div>
+        </div>
+        ${password_field_html}
+        <button type="submit" class="btn btn-accent" style="margin-top:10px;">เปลี่ยนเหรียญ</button>
+      </form>
+    </section>
+
+    <footer>
+      <span>อัปเดตล่าสุด ${last_updated}</span>
+      <span class="sep">·</span>
+      <a href="#" class="refresh-link" onclick="location.reload();return false;">รีเฟรชตอนนี้</a>
+    </footer>
+  </div>
+</body>
+</html>""")
+
+
+def _fmt_thb(value):
+    try:
+        return f"{value:,.2f}"
+    except (TypeError, ValueError):
+        return "0.00"
+
+
+def _render_card(label, value, sub="", value_class=""):
+    sub_html = f'<div class="card-sub">{sub}</div>' if sub else ""
+    return f'<div class="card"><div class="card-label">{label}</div><div class="card-value {value_class}">{value}</div>{sub_html}</div>'
+
+
+def render_dashboard(running_symbol, state, control):
+    state = state or {}
+    status = state.get("status", "IDLE")
+    entry_price = float(state.get("entry_price", 0.0) or 0.0)
+    highest_price = float(state.get("highest_price", 0.0) or 0.0)
+    quantity = float(state.get("quantity", 0.0) or 0.0)
+    fee_pct = float(state.get("roundtrip_fee_percent", InnovestXTradingBot.DEFAULT_ROUNDTRIP_FEE_PERCENT) or 0.0)
+    daily_pnl = float(state.get("daily_realized_pnl", 0.0) or 0.0)
+    daily_start = float(state.get("daily_start_balance", 0.0) or 0.0)
+    consecutive_losses = int(state.get("consecutive_losses", 0) or 0)
+    price_history = state.get("price_history", []) or []
+
+    current_price = price_history[-1][1] if price_history else None
+    now = time.time()
+
+    # ---- status pill ----
+    status_map = {
+        "HOLDING": ("status-holding", "HOLDING"),
+        "HALTED": ("status-halted", "HALTED"),
+    }
+    status_class, status_label = status_map.get(status, ("status-idle", "IDLE"))
+
+    # ---- hero ----
+    if current_price is not None:
+        whole, _, dec = f"{current_price:,.2f}".partition(".")
+        hero_price = f"฿{whole}<span class=\"hero-decimal\">.{dec}</span>"
+    else:
+        hero_price = "฿—"
+
+    hero_delta_html = ""
+    if status == "HOLDING" and entry_price > 0 and current_price is not None:
+        delta_pct = (current_price - entry_price) / entry_price * 100
+        cls = "positive" if delta_pct >= 0 else "negative"
+        arrow = "▲" if delta_pct >= 0 else "▼"
+        hero_delta_html = f'<div class="hero-delta {cls}">{arrow} {delta_pct:+.2f}% จากต้นทุน</div>'
+    elif status == "IDLE":
+        hero_delta_html = '<div class="hero-sub">รอสัญญาณเข้าซื้อ...</div>'
+
+    # ---- banners ----
+    banners = []
+    if status == "HALTED":
+        daily_loss_percent = -daily_pnl / daily_start * 100 if daily_start > 0 else 0.0
+        if daily_loss_percent >= InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT:
+            reason = f"ขาดทุนสะสมวันนี้เกิน {InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT:.1f}%"
+        elif consecutive_losses >= InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES:
+            reason = f"ขาดทุนติดกัน {consecutive_losses} ไม้ ครบเพดาน {InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES} ไม้"
+        else:
+            reason = "Circuit breaker ทำงาน (ดูรายละเอียดใน log)"
+        banners.append(f'<div class="banner banner-danger">🛑 บอทหยุดเทรดชั่วคราว — {reason} (จะปลดล็อกอัตโนมัติวันถัดไป)</div>')
+
+    if control.get("paused"):
+        banners.append('<div class="banner banner-info">⏸ บอทหยุดเทรดชั่วคราว (สั่งจากหน้านี้) — จะไม่เปิดออเดอร์ใหม่จนกว่าจะกด "เริ่มเทรดต่อ"</div>')
+
+    if control.get("active_symbol") != running_symbol:
+        banners.append(f'<div class="banner banner-info">🔄 คำขอเปลี่ยนเหรียญเป็น {control.get("active_symbol")} กำลังรออยู่ — จะเปลี่ยนทันทีหลังขายโพซิชัน {running_symbol} เสร็จ</div>')
+
+    if not os.environ.get("DASHBOARD_PASSWORD"):
+        banners.append('<div class="banner banner-warning">⚠️ หน้านี้ยังไม่มีรหัสผ่านป้องกัน ใครมีลิงก์นี้ก็สั่งหยุด/เปลี่ยนเหรียญได้ — แนะนำตั้งค่า DASHBOARD_PASSWORD ใน Environment Variables ของ Render</div>')
+
+    banners_html = "".join(banners)
+
+    # ---- progress bar (สะสมข้อมูล 2 ชม.) ----
+    progress_html = ""
+    if status == "IDLE":
+        if price_history:
+            elapsed = max(0.0, now - price_history[0][0])
+        else:
+            elapsed = 0.0
+        if elapsed < 7200:
+            pct = min(100, elapsed / 7200 * 100)
+            minutes_done = int(elapsed // 60)
+            minutes_left = max(0, 120 - minutes_done)
+            sub = f"{minutes_done} / 120 นาที · เหลืออีกประมาณ {minutes_left} นาที" if price_history else \
+                  "ยังไม่มีข้อมูลราคาเลย รอรอบแรกของบอท (ทุก 60 วินาที)"
+            progress_html = (
+                '<section class="progress-card">'
+                '<div class="progress-label">กำลังสะสมข้อมูลราคา (ต้องครบ 2 ชั่วโมงก่อนเริ่มวิเคราะห์สัญญาณซื้อ)</div>'
+                f'<div class="progress-bar"><div class="progress-fill" style="width:{pct:.0f}%"></div></div>'
+                f'<div class="progress-sub">{sub}</div>'
+                '</section>'
+            )
+
+    # ---- cards ----
+    cards = []
+    if status == "HOLDING":
+        unrealized = quantity * (current_price - entry_price) if current_price is not None else 0.0
+        unrealized_pct = (current_price - entry_price) / entry_price * 100 if entry_price > 0 and current_price is not None else 0.0
+        cards.append(_render_card("กำไร/ขาดทุน (ยังไม่ขาย)", f"{'+' if unrealized >= 0 else ''}{_fmt_thb(unrealized)} ฿",
+                                   sub=f"{unrealized_pct:+.2f}%", value_class="positive" if unrealized >= 0 else "negative"))
+        cards.append(_render_card("ต้นทุนเฉลี่ย", f"{_fmt_thb(entry_price)} ฿"))
+        cards.append(_render_card("จุดสูงสุดตั้งแต่ถือ", f"{_fmt_thb(highest_price)} ฿"))
+        cards.append(_render_card("ค่าธรรมเนียม (ประมาณ)", f"{fee_pct:.2f}%", value_class="accent"))
+        cards.append(_render_card("กำไรวันนี้ (รับรู้แล้ว)", f"{'+' if daily_pnl >= 0 else ''}{_fmt_thb(daily_pnl)} ฿",
+                                   value_class="positive" if daily_pnl >= 0 else "negative"))
+        cards.append(_render_card("ขาดทุนติดกัน", f"{consecutive_losses} / {InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES} ไม้"))
+    else:
+        cards.append(_render_card("กำไรวันนี้ (รับรู้แล้ว)", f"{'+' if daily_pnl >= 0 else ''}{_fmt_thb(daily_pnl)} ฿",
+                                   value_class="positive" if daily_pnl >= 0 else "negative"))
+        cards.append(_render_card("ทุนเริ่มต้นวันนี้", f"{_fmt_thb(daily_start)} ฿"))
+        cards.append(_render_card("ขาดทุนติดกัน", f"{consecutive_losses} / {InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES} ไม้"))
+        cards.append(_render_card("ค่าธรรมเนียม (ประมาณล่าสุด)", f"{fee_pct:.2f}%", value_class="accent"))
+    cards_html = "".join(cards)
+
+    # ---- control panel state ----
+    if control.get("paused"):
+        pause_sub = "ตอนนี้: หยุดอยู่ (ไม่เปิดออเดอร์ใหม่)"
+        pause_btn_class = "btn-accent"
+        pause_btn_label = "▶ เริ่มเทรดต่อ"
+    else:
+        pause_sub = "ตอนนี้: กำลังทำงานปกติ"
+        pause_btn_class = "btn-neutral"
+        pause_btn_label = "⏸ หยุดชั่วคราว"
+
+    password_field_html = ""
+    if os.environ.get("DASHBOARD_PASSWORD"):
+        password_field_html = '<input class="password-input" type="password" name="password" placeholder="รหัสผ่านหน้าควบคุม" style="margin-top:8px;">'
+
+    last_updated = datetime.now().strftime("%H:%M:%S")
+
+    return DASHBOARD_TEMPLATE.safe_substitute(
+        symbol_display=f"{running_symbol[:-3]}/{running_symbol[-3:]}" if running_symbol.endswith("THB") else running_symbol,
+        status_class=status_class,
+        status_label=status_label,
+        hero_price=hero_price,
+        hero_delta_html=hero_delta_html,
+        banners_html=banners_html,
+        progress_html=progress_html,
+        cards_html=cards_html,
+        pause_sub=pause_sub,
+        pause_btn_class=pause_btn_class,
+        pause_btn_label=pause_btn_label,
+        running_symbol=running_symbol,
+        symbol_input_value=control.get("active_symbol", running_symbol),
+        password_field_html=password_field_html,
+        last_updated=last_updated,
+    )
+
+
+# ==================== Web Service (หน้าเว็บสถานะ + ควบคุมบอท สำหรับ Render) ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # กัน log ของ http.server เองไปปนกับ log ของบอท (คำขอ GET ทุกครั้งไม่จำเป็นต้องขึ้น log)
+
     def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running!")
+        try:
+            running_symbol = RUNNING_SYMBOL["value"] or DEFAULT_SYMBOL
+            state = db.reference(f"bots/{running_symbol}/state").get() or {}
+            control = load_control()
+            html = render_dashboard(running_symbol, state, control)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html.encode("utf-8"))
+        except Exception as e:
+            logger.error(f"Dashboard render error: {e}")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write("Bot is running! (dashboard error, see logs)".encode("utf-8"))
+
+    def do_POST(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length).decode("utf-8") if length else ""
+            fields = urllib.parse.parse_qs(raw)
+
+            required_password = os.environ.get("DASHBOARD_PASSWORD")
+            given_password = fields.get("password", [""])[0]
+            if required_password and given_password != required_password:
+                self.send_response(403)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write("รหัสผ่านไม่ถูกต้อง".encode("utf-8"))
+                return
+
+            if self.path == "/control/pause":
+                control = load_control()
+                control["paused"] = not control.get("paused", False)
+                save_control(control)
+                logger.info(f"[เว็บควบคุม] ตั้งค่า paused={control['paused']}")
+            elif self.path == "/control/symbol":
+                requested = fields.get("symbol", [""])[0].strip().upper()
+                if re.match(r"^[A-Z0-9]{2,20}$", requested):
+                    control = load_control()
+                    control["active_symbol"] = requested
+                    save_control(control)
+                    logger.info(f"[เว็บควบคุม] คำขอเปลี่ยนเหรียญเป็น {requested}")
+                else:
+                    logger.warning(f"[เว็บควบคุม] ปฏิเสธคำขอเปลี่ยนเหรียญ: รูปแบบไม่ถูกต้อง ({requested})")
+
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+        except Exception as e:
+            logger.error(f"Dashboard control error: {e}")
+            self.send_response(500)
+            self.end_headers()
 
 
 def start_dummy_health_check_server():
@@ -644,9 +991,49 @@ if __name__ == "__main__":
             "(ห้าม hardcode API key/secret ลงในไฟล์โค้ดโดยเด็ดขาด)"
         )
 
-    # เปิด Server จำลองหลอก Render ให้ตรวจเจอ Port
+    # เปิด Server จำลองหลอก Render ให้ตรวจเจอ Port + เสิร์ฟแดชบอร์ด
     health_thread = threading.Thread(target=start_dummy_health_check_server, daemon=True)
     health_thread.start()
 
-    bot = InnovestXTradingBot(api_key=api_key, api_secret=api_secret, symbol="BTCTHB")
-    bot.run(poll_interval_sec=60)
+    POLL_INTERVAL_SEC = 60
+
+    control = load_control()
+    save_control(control)  # เขียนกลับให้ path บน Firebase มีค่าเริ่มต้นแน่นอนตั้งแต่แรก
+    current_symbol = control["active_symbol"]
+    RUNNING_SYMBOL["value"] = current_symbol
+
+    bot = InnovestXTradingBot(api_key=api_key, api_secret=api_secret, symbol=current_symbol)
+    bot.reconcile_state_on_startup()
+    logger.info(f"เริ่มบอทเทรด {current_symbol} (poll ทุก {POLL_INTERVAL_SEC} วิ) — กด Ctrl+C เพื่อหยุดอย่างปลอดภัย")
+
+    stop_all = False
+    while not stop_all:
+        control = load_control()
+
+        # --- เช็คคำขอเปลี่ยนเหรียญจากหน้าเว็บ ---
+        if control["active_symbol"] != current_symbol:
+            if bot.state.get("quantity", 0) <= 0:
+                logger.info(f"🔄 เปลี่ยนเหรียญเทรดจาก {current_symbol} เป็น {control['active_symbol']} (สั่งจากหน้าเว็บ)")
+                current_symbol = control["active_symbol"]
+                bot = InnovestXTradingBot(api_key=api_key, api_secret=api_secret, symbol=current_symbol)
+                bot.reconcile_state_on_startup()
+                RUNNING_SYMBOL["value"] = current_symbol
+            else:
+                logger.info(f"⏳ มีคำขอเปลี่ยนเป็น {control['active_symbol']} แต่ตอนนี้ถือ {current_symbol} อยู่ — รอขายก่อน")
+
+        # --- เช็คสถานะหยุดชั่วคราวจากหน้าเว็บ ---
+        if control["paused"]:
+            logger.info("⏸ บอทหยุดชั่วคราว (สั่งโดยผู้ใช้ผ่านหน้าเว็บ) — ข้ามการเทรดรอบนี้")
+        else:
+            try:
+                bot.run_once()
+            except Exception:
+                logger.exception("เกิดข้อผิดพลาดไม่คาดคิดใน main loop — บอทจะพยายามทำงานต่อในรอบถัดไป")
+
+        for _ in range(POLL_INTERVAL_SEC):
+            if bot._stop_requested:
+                stop_all = True
+                break
+            time.sleep(1)
+
+    logger.info("บอทหยุดทำงานเรียบร้อย (state ถูกบันทึกแล้ว)")
