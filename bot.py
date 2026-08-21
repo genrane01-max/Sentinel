@@ -50,6 +50,7 @@ class InnovestXTradingBot:
     MAX_CONSECUTIVE_LOSSES = 3            # หยุดเทรดถ้าขาดทุนติดกันกี่ไม้
     DEFAULT_ROUNDTRIP_FEE_PERCENT = 0.50  # fallback ถ้าดึงค่าธรรมเนียมจริงไม่ได้ (ปรับให้ตรงจริง!)
     MIN_ORDER_THB = 100.0
+    MAX_ACCEPTABLE_SLIPPAGE_PERCENT = 1.0   # ถ้าราคาจริงเพี้ยนจากที่คาดเกิน % นี้ จะแจ้งเตือน
     REQUEST_TIMEOUT_SEC = 10
     MAX_RETRIES = 3
     FEE_ESTIMATE_PATH = "/api/v1/digital-asset/order/fee/inquiry"
