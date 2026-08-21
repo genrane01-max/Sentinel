@@ -104,6 +104,7 @@ def load_control():
         "active_symbol": (data.get("active_symbol") or DEFAULT_SYMBOL).upper(),
         "paused": bool(data.get("paused", False)),
         "max_daily_loss_percent": max_daily_loss_percent,
+        "unlock_requested": bool(data.get("unlock_requested", False)),
     }
 
 
@@ -741,6 +742,7 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
 
     <section class="control">
       <div class="control-title">ควบคุมบอท</div>
+      ${unlock_button_html}
       <form class="control-row" method="POST" action="/control/pause">
         <div class="control-info">
           <div class="control-label">การเทรดอัตโนมัติ</div>
@@ -837,14 +839,15 @@ def render_dashboard(running_symbol, state, control):
     # ---- banners ----
     banners = []
     if status == "HALTED":
+        active_threshold = control.get("max_daily_loss_percent", InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT)
         daily_loss_percent = -daily_pnl / daily_start * 100 if daily_start > 0 else 0.0
-        if daily_loss_percent >= InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT:
-            reason = f"ขาดทุนสะสมวันนี้เกิน {InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT:.1f}%"
+        if daily_loss_percent >= active_threshold:
+            reason = f"ขาดทุนสะสมวันนี้เกิน {active_threshold:.1f}%"
         elif consecutive_losses >= InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES:
             reason = f"ขาดทุนติดกัน {consecutive_losses} ไม้ ครบเพดาน {InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES} ไม้"
         else:
             reason = "Circuit breaker ทำงาน (ดูรายละเอียดใน log)"
-        banners.append(f'<div class="banner banner-danger">🛑 บอทหยุดเทรดชั่วคราว — {reason} (จะปลดล็อกอัตโนมัติวันถัดไป)</div>')
+        banners.append(f'<div class="banner banner-danger">🛑 บอทหยุดเทรดชั่วคราว — {reason} (ปลดล็อกอัตโนมัติวันถัดไป หรือกดปลดล็อกเองด้านล่าง)</div>')
 
     if control.get("paused"):
         banners.append('<div class="banner banner-info">⏸ บอทหยุดเทรดชั่วคราว (สั่งจากหน้านี้) — จะไม่เปิดออเดอร์ใหม่จนกว่าจะกด "เริ่มเทรดต่อ"</div>')
@@ -915,6 +918,17 @@ def render_dashboard(running_symbol, state, control):
 
     last_updated = datetime.now().strftime("%H:%M:%S")
 
+    unlock_button_html = ""
+    if status == "HALTED":
+        unlock_button_html = f'''<form class="control-row" method="POST" action="/control/unlock">
+        <div class="control-info">
+          <div class="control-label">บอทถูกล็อกอยู่ (HALTED)</div>
+          <div class="control-sub">{reason}</div>
+        </div>
+        {password_field_html}
+        <button type="submit" class="btn btn-danger">🔓 ปลดล็อกตอนนี้</button>
+      </form>'''
+
     return DASHBOARD_TEMPLATE.safe_substitute(
         symbol_display=f"{running_symbol[:-3]}/{running_symbol[-3:]}" if running_symbol.endswith("THB") else running_symbol,
         status_class=status_class,
@@ -924,6 +938,7 @@ def render_dashboard(running_symbol, state, control):
         banners_html=banners_html,
         progress_html=progress_html,
         cards_html=cards_html,
+        unlock_button_html=unlock_button_html,
         pause_sub=pause_sub,
         pause_btn_class=pause_btn_class,
         pause_btn_label=pause_btn_label,
@@ -999,6 +1014,11 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                     logger.info(f"[เว็บควบคุม] ตั้งค่าขาดทุนสูงสุดต่อวันเป็น {value}%")
                 else:
                     logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าขาดทุนสูงสุดต่อวัน: '{raw_value}' (ต้องอยู่ระหว่าง 0.1-100)")
+            elif self.path == "/control/unlock":
+                control = load_control()
+                control["unlock_requested"] = True
+                save_control(control)
+                logger.info("[เว็บควบคุม] ได้รับคำขอปลดล็อกบอท (HALTED -> IDLE) — จะมีผลในรอบ loop ถัดไป (ภายใน 60 วิ)")
 
             self.send_response(303)
             self.send_header("Location", "/")
@@ -1058,6 +1078,18 @@ if __name__ == "__main__":
         if bot.max_daily_loss_percent != control["max_daily_loss_percent"]:
             logger.info(f"🔧 ปรับเพดานขาดทุนต่อวันจาก {bot.max_daily_loss_percent}% เป็น {control['max_daily_loss_percent']}% (สั่งจากหน้าเว็บ)")
             bot.max_daily_loss_percent = control["max_daily_loss_percent"]
+
+        # --- เช็คคำขอปลดล็อก (HALTED -> IDLE) จากหน้าเว็บ ---
+        # แก้ค่าตรงที่ bot.state ในหน่วยความจำเลย (ไม่ใช่แค่บน Firebase) เพราะบอทที่รันอยู่
+        # จะไม่อ่าน state ซ้ำระหว่างรัน ถ้าไปแก้ Firebase ตรงๆ บอทจะเขียนทับกลับเป็น HALTED เหมือนเดิม
+        if control["unlock_requested"]:
+            if bot.state.get("status") == "HALTED":
+                logger.info("🔓 ปลดล็อกบอทตามคำขอจากหน้าเว็บ: HALTED -> IDLE (รีเซ็ตขาดทุนติดกันเป็น 0)")
+                bot.state["status"] = "IDLE"
+                bot.state["consecutive_losses"] = 0
+                bot.save_state()
+            control["unlock_requested"] = False
+            save_control(control)
 
         # --- เช็คสถานะหยุดชั่วคราวจากหน้าเว็บ ---
         if control["paused"]:
