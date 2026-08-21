@@ -365,7 +365,17 @@ class InnovestXTradingBot:
             time.sleep(delay_sec)
         logger.warning(f"ไม่สามารถยืนยันราคาเฉลี่ยของ order {order_id} ได้หลัง {max_attempts} ครั้ง")
         return 0.0
-
+        
+        def _check_slippage(self, expected_price, actual_price, context=""):
+        if expected_price <= 0:
+            return
+        slippage_percent = abs(actual_price - expected_price) / expected_price * 100
+        if slippage_percent >= self.MAX_ACCEPTABLE_SLIPPAGE_PERCENT:
+            logger.error(f"⚠️ SLIPPAGE สูงผิดปกติ ({context}): คาดไว้ {expected_price:.2f} ได้จริง {actual_price:.2f} "
+                         f"(ห่างกัน {slippage_percent:.2f}%) — ตลาดผันผวนหนักหรือสภาพคล่องบาง ควรตรวจสอบด้วยตา")
+        else:
+            logger.info(f"Slippage ({context}): {slippage_percent:.2f}%")
+    
     # ==================== Circuit breaker ====================
 
     def _today_str(self):
