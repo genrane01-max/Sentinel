@@ -112,7 +112,7 @@ class InnovestXTradingBot:
         self._stop_requested = True
         self.save_state()
         
-        def reconcile_state_on_startup(self):
+    def reconcile_state_on_startup(self):
         """เช็คว่า state ใน state file ตรงกับยอดจริงในพอร์ตหรือไม่ ก่อนเริ่ม loop"""
         logger.info("กำลังตรวจสอบสถานะกับยอดจริงในพอร์ต (Reconcile)...")
         _, coin_free, _ = self.get_free_balance()
@@ -366,7 +366,7 @@ class InnovestXTradingBot:
         logger.warning(f"ไม่สามารถยืนยันราคาเฉลี่ยของ order {order_id} ได้หลัง {max_attempts} ครั้ง")
         return 0.0
         
-        def _check_slippage(self, expected_price, actual_price, context=""):
+    def _check_slippage(self, expected_price, actual_price, context=""):
         if expected_price <= 0:
             return
         slippage_percent = abs(actual_price - expected_price) / expected_price * 100
@@ -467,7 +467,7 @@ class InnovestXTradingBot:
             if avg_price == 0.0:
                 avg_price = current_price
                 logger.warning("ยืนยันราคาจับคู่จริงไม่ได้ ใช้ราคาตลาด ณ ขณะนั้นแทน (ควรตรวจสอบ order ด้วยมือ)")
-                 self._check_slippage(current_price, avg_price, "ซื้อ")
+            self._check_slippage(current_price, avg_price, "ซื้อ")
 
             estimated_qty = self._floor_to_increment(buy_value / avg_price, rules["quantity_increment"])
             fee_pct = self.estimate_roundtrip_fee_percent()
