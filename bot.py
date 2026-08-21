@@ -315,37 +315,37 @@ class InnovestXTradingBot:
         except (InvalidOperation, ZeroDivisionError):
             return value
 
-def estimate_roundtrip_fee_percent(self):
-        """พยายามดึงค่าธรรมเนียมจริงจาก API และคำนวณเป็นเปอร์เซ็นต์; ถ้าทำไม่ได้ให้ใช้ค่า default แทน"""
-        # 1. ปรับปรุงพารามิเตอร์ขาส่ง (Request) ตามคู่มือ InnovestX: บังคับส่ง symbol, amount, price, side (ไม่มี orderType)
-        dummy_amount = 0.01      # จำนวนเหรียญจำลองที่ใช้ทดสอบคำนวณ
-        dummy_price = 100000.0   # ราคาสมมติต่อหน่วย
-        total_value = dummy_amount * dummy_price  # มูลค่ารวมจำลอง (1,000 THB)
-        
-        body = {
-            "symbol": self.symbol,
-            "amount": dummy_amount,
-            "price": dummy_price,
-            "side": 0  # 0 = Buy (ฝั่งซื้อ)
-        }
-        
-        res = self.send_request("POST", self.FEE_ESTIMATE_PATH, body=body)
-        
-        if res and res.get("code") == "0000":
-            try:
-                # 2. ปรับปรุงขาตอบกลับ (Response) ตามคู่มือ: ระบบส่งค่ากลับมาเป็น 'orderFee' (ค่าฟีดิบเป็นจำนวนเงิน) ไม่ใช่ 'feePercent'
-                order_fee_str = res["data"].get("orderFee", "0")
-                order_fee = float(order_fee_str)
-                
-                # 3. คำนวณอัตราค่าธรรมเนียมกลับเป็นเปอร์เซ็นต์จริง: (ค่าธรรมเนียมจริง / มูลค่าคำสั่งซื้อรวม) * 100
-                if order_fee > 0 and total_value > 0:
-                    buy_fee_pct = (order_fee / total_value) * 100
-                    return buy_fee_pct * 2  # คูณ 2 เพื่อประมาณการค่าฟีแบบไป-กลับ (ซื้อ + ขาย)
-            except (KeyError, TypeError, ValueError) as e:
-                logger.warning(f"เกิดข้อผิดพลาดในการคำนวณค่าธรรมเนียมจริง: {e}")
-                
-        logger.warning(f"ดึงค่าธรรมเนียมจริงไม่ได้ ใช้ default {self.DEFAULT_ROUNDTRIP_FEE_PERCENT}% แทน (ควรตรวจสอบ FEE_ESTIMATE_PATH และพารามิเตอร์)")
-        return self.DEFAULT_ROUNDTRIP_FEE_PERCENT
+    def estimate_roundtrip_fee_percent(self):
+            """พยายามดึงค่าธรรมเนียมจริงจาก API และคำนวณเป็นเปอร์เซ็นต์; ถ้าทำไม่ได้ให้ใช้ค่า default แทน"""
+            # 1. ปรับปรุงพารามิเตอร์ขาส่ง (Request) ตามคู่มือ InnovestX: บังคับส่ง symbol, amount, price, side (ไม่มี orderType)
+            dummy_amount = 0.01      # จำนวนเหรียญจำลองที่ใช้ทดสอบคำนวณ
+            dummy_price = 100000.0   # ราคาสมมติต่อหน่วย
+            total_value = dummy_amount * dummy_price  # มูลค่ารวมจำลอง (1,000 THB)
+            
+            body = {
+                "symbol": self.symbol,
+                "amount": dummy_amount,
+                "price": dummy_price,
+                "side": 0  # 0 = Buy (ฝั่งซื้อ)
+            }
+            
+            res = self.send_request("POST", self.FEE_ESTIMATE_PATH, body=body)
+            
+            if res and res.get("code") == "0000":
+                try:
+                    # 2. ปรับปรุงขาตอบกลับ (Response) ตามคู่มือ: ระบบส่งค่ากลับมาเป็น 'orderFee' (ค่าฟีดิบเป็นจำนวนเงิน) ไม่ใช่ 'feePercent'
+                    order_fee_str = res["data"].get("orderFee", "0")
+                    order_fee = float(order_fee_str)
+                    
+                    # 3. คำนวณอัตราค่าธรรมเนียมกลับเป็นเปอร์เซ็นต์จริง: (ค่าธรรมเนียมจริง / มูลค่าคำสั่งซื้อรวม) * 100
+                    if order_fee > 0 and total_value > 0:
+                        buy_fee_pct = (order_fee / total_value) * 100
+                        return buy_fee_pct * 2  # คูณ 2 เพื่อประมาณการค่าฟีแบบไป-กลับ (ซื้อ + ขาย)
+                except (KeyError, TypeError, ValueError) as e:
+                    logger.warning(f"เกิดข้อผิดพลาดในการคำนวณค่าธรรมเนียมจริง: {e}")
+                    
+            logger.warning(f"ดึงค่าธรรมเนียมจริงไม่ได้ ใช้ default {self.DEFAULT_ROUNDTRIP_FEE_PERCENT}% แทน (ควรตรวจสอบ FEE_ESTIMATE_PATH และพารามิเตอร์)")
+            return self.DEFAULT_ROUNDTRIP_FEE_PERCENT
 
     # ==================== Account ====================
 
