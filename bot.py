@@ -324,6 +324,28 @@ class InnovestXTradingBot:
         if not history:
             return False
         return (time.time() - history[0][0]) >= 7200  # อย่างน้อย 2 ชั่วโมง
+      
+    def _trend_confidence(self, current_price, price_1h_ago, price_2h_ago, price_3h_ago):
+        """ทิศทางหลักดูจาก 1ชม.ล่าสุด แล้วให้คะแนนความมั่นใจเพิ่มจาก 2ชม./3ชม.ก่อนหน้า (50% ต่อชม.)"""
+        if current_price is None or price_1h_ago is None or current_price == price_1h_ago:
+            return None, 0
+   
+        direction = "up" if current_price > price_1h_ago else "down"
+        confidence = 0
+   
+        if price_1h_ago is not None and price_2h_ago is not None:
+            hour2_same_direction = (direction == "up" and price_1h_ago > price_2h_ago) or \
+                                   (direction == "down" and price_1h_ago < price_2h_ago)
+            if hour2_same_direction:
+                confidence += 50
+   
+        if price_2h_ago is not None and price_3h_ago is not None:
+            hour3_same_direction = (direction == "up" and price_2h_ago > price_3h_ago) or \
+                                   (direction == "down" and price_2h_ago < price_3h_ago)
+            if hour3_same_direction:
+                confidence += 50
+   
+        return direction, confidence
 
     def get_symbol_rules(self):
         products_res = self.send_request("GET", "/api/v1/digital-asset/products")
