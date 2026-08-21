@@ -94,9 +94,16 @@ def load_control():
     except Exception as e:
         logger.warning(f"อ่าน bot_control จาก Firebase ไม่ได้ ใช้ค่าเริ่มต้น: {e}")
         data = {}
+    try:
+        max_daily_loss_percent = float(data.get("max_daily_loss_percent", InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT))
+    except (TypeError, ValueError):
+        max_daily_loss_percent = InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT
+    if not (0.1 <= max_daily_loss_percent <= 100):
+        max_daily_loss_percent = InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT
     return {
         "active_symbol": (data.get("active_symbol") or DEFAULT_SYMBOL).upper(),
         "paused": bool(data.get("paused", False)),
+        "max_daily_loss_percent": max_daily_loss_percent,
     }
 
 
@@ -134,6 +141,9 @@ class InnovestXTradingBot:
         self.state_path = f"bots/{symbol}/state"
         self.trailing_stop_percent = trailing_stop_percent
         self.stop_loss_percent = stop_loss_percent
+        # ปรับได้จากหน้าเว็บระหว่างรัน (ไม่ต้อง restart) — ค่าเริ่มต้นใช้ค่าคงที่ของคลาสไปก่อน
+        # ตัวแปรนี้จะถูกอัปเดตจริงทุกรอบ loop ใน __main__ จากค่าที่เก็บบน Firebase (bot_control)
+        self.max_daily_loss_percent = self.MAX_DAILY_LOSS_PERCENT
         self._stop_requested = False
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -463,8 +473,8 @@ class InnovestXTradingBot:
             daily_loss_percent = -self.state["daily_realized_pnl"] / self.state["daily_start_balance"] * 100
 
         halt_reason = None
-        if daily_loss_percent >= self.MAX_DAILY_LOSS_PERCENT:
-            halt_reason = f"ขาดทุนสะสมวันนี้ {daily_loss_percent:.2f}% เกินเพดาน {self.MAX_DAILY_LOSS_PERCENT}%"
+        if daily_loss_percent >= self.max_daily_loss_percent:
+            halt_reason = f"ขาดทุนสะสมวันนี้ {daily_loss_percent:.2f}% เกินเพดาน {self.max_daily_loss_percent}%"
         elif self.state["consecutive_losses"] >= self.MAX_CONSECUTIVE_LOSSES:
             halt_reason = f"ขาดทุนติดกัน {self.state['consecutive_losses']} ไม้ ถึงเพดาน {self.MAX_CONSECUTIVE_LOSSES} ไม้"
 
@@ -753,6 +763,15 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
         ${password_field_html}
         <button type="submit" class="btn btn-accent" style="margin-top:10px;">เปลี่ยนเหรียญ</button>
       </form>
+      <form class="control-row" method="POST" action="/control/risk" style="flex-direction:column; align-items:stretch;">
+        <div class="control-info">
+          <div class="control-label">ขาดทุนสูงสุดที่ยอมรับต่อวัน (กำลังตั้ง: ${max_daily_loss_percent}%)</div>
+          <input class="symbol-input" style="text-transform:none;" type="number" step="0.1" min="0.1" max="100" name="max_daily_loss_percent" value="${max_daily_loss_percent}">
+          <div class="control-sub" style="margin-top:6px;">ถ้าขาดทุนสะสมวันนี้ถึง % นี้ บอทจะหยุดเทรดอัตโนมัติ (HALTED) จนกว่าจะข้ามวันใหม่ หรือปลดล็อกเอง</div>
+        </div>
+        ${password_field_html}
+        <button type="submit" class="btn btn-accent" style="margin-top:10px;">บันทึกค่า</button>
+      </form>
     </section>
 
     <footer>
@@ -910,6 +929,7 @@ def render_dashboard(running_symbol, state, control):
         pause_btn_label=pause_btn_label,
         running_symbol=running_symbol,
         symbol_input_value=control.get("active_symbol", running_symbol),
+        max_daily_loss_percent=control.get("max_daily_loss_percent", InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT),
         password_field_html=password_field_html,
         last_updated=last_updated,
     )
@@ -966,6 +986,19 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                     logger.info(f"[เว็บควบคุม] คำขอเปลี่ยนเหรียญเป็น {requested}")
                 else:
                     logger.warning(f"[เว็บควบคุม] ปฏิเสธคำขอเปลี่ยนเหรียญ: รูปแบบไม่ถูกต้อง ({requested})")
+            elif self.path == "/control/risk":
+                raw_value = fields.get("max_daily_loss_percent", [""])[0].strip()
+                try:
+                    value = float(raw_value)
+                except ValueError:
+                    value = None
+                if value is not None and 0.1 <= value <= 100:
+                    control = load_control()
+                    control["max_daily_loss_percent"] = value
+                    save_control(control)
+                    logger.info(f"[เว็บควบคุม] ตั้งค่าขาดทุนสูงสุดต่อวันเป็น {value}%")
+                else:
+                    logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าขาดทุนสูงสุดต่อวัน: '{raw_value}' (ต้องอยู่ระหว่าง 0.1-100)")
 
             self.send_response(303)
             self.send_header("Location", "/")
@@ -1021,6 +1054,11 @@ if __name__ == "__main__":
             else:
                 logger.info(f"⏳ มีคำขอเปลี่ยนเป็น {control['active_symbol']} แต่ตอนนี้ถือ {current_symbol} อยู่ — รอขายก่อน")
 
+        # --- ซิงค์ค่าเพดานขาดทุนต่อวันจากหน้าเว็บ (มีผลทันที ไม่ต้อง restart) ---
+        if bot.max_daily_loss_percent != control["max_daily_loss_percent"]:
+            logger.info(f"🔧 ปรับเพดานขาดทุนต่อวันจาก {bot.max_daily_loss_percent}% เป็น {control['max_daily_loss_percent']}% (สั่งจากหน้าเว็บ)")
+            bot.max_daily_loss_percent = control["max_daily_loss_percent"]
+
         # --- เช็คสถานะหยุดชั่วคราวจากหน้าเว็บ ---
         if control["paused"]:
             logger.info("⏸ บอทหยุดชั่วคราว (สั่งโดยผู้ใช้ผ่านหน้าเว็บ) — ข้ามการเทรดรอบนี้")
@@ -1037,3 +1075,4 @@ if __name__ == "__main__":
             time.sleep(1)
 
     logger.info("บอทหยุดทำงานเรียบร้อย (state ถูกบันทึกแล้ว)")
+
