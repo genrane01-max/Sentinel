@@ -523,21 +523,29 @@ class InnovestXTradingBot:
                 logger.info("ข้อมูลราคาย้อนหลังยังไม่ครบ 2 ชั่วโมง รอสะสมข้อมูลต่อ")
                 return
 
-            price_1h_ago = self._price_at_offset(3600)
-            price_2h_ago = self._price_at_offset(7200)
-            price_open_1h = self._price_open_current_hour()
-            if None in (price_1h_ago, price_2h_ago, price_open_1h):
-                logger.info("ข้อมูลราคาบางช่วงขาดหาย (gap) รอรอบถัดไป")
-                return
-
-            rule_trend_up = current_price > price_1h_ago > price_2h_ago
-            rule_current_hour_green = current_price > price_open_1h
-            logger.info(f"เทรนด์ 3ชม: {current_price} > {price_1h_ago} > {price_2h_ago} -> {rule_trend_up} | "
-                        f"ชม.นี้เขียว: {current_price} > {price_open_1h} -> {rule_current_hour_green}")
-            if not (rule_trend_up and rule_current_hour_green):
-                return
-
-            logger.info("🔥 สัญญาณเข้าซื้อครบเงื่อนไข")
+        price_1h_ago = self._price_at_offset(3600)
+        price_2h_ago = self._price_at_offset(7200)
+        price_3h_ago = self._price_at_offset(10800)
+        price_open_1h = self._price_open_current_hour()
+         
+        if price_1h_ago is None or price_open_1h is None:
+            logger.info("ข้อมูลราคาบางช่วงขาดหาย (gap) รอรอบถัดไป")
+            return
+         
+        direction, confidence = self._trend_confidence(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
+        rule_current_hour_green = current_price > price_open_1h
+         
+        logger.info(f"ทิศทาง 1ชม: {direction or 'flat'} (ยืนยัน {confidence}%) | ชม.นี้เขียว: {rule_current_hour_green}")
+         
+        if direction == "down":
+            logger.info(f"⚠️ เห็นสัญญาณขาลง (ยืนยัน {confidence}%) --- ข้ามรอบนี้ ไม่เข้าซื้อ")
+            return
+         
+        MIN_CONFIDENCE_TO_BUY = 50  # ต้องมี 2ชม. หรือ 3ชม. ยืนยันทิศทางเดียวกันอย่างน้อย 1 ใน 2 (ปรับตัวเลขนี้ได้เลย)
+         
+        if direction != "up" or confidence < MIN_CONFIDENCE_TO_BUY or not rule_current_hour_green:
+            return
+            
             thb_free, _, has_pending = self.get_free_balance()
             if has_pending:
                 logger.info("ข้ามการซื้อ: มีออเดอร์ค้างอยู่ในระบบ")
