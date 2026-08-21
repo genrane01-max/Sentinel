@@ -1,35 +1,23 @@
 """
-InnovestX Automated Trading Bot — Price Action 3H Strategy (v3, dashboard + control)
+InnovestX Automated Trading Bot — Price Action 3H Strategy (v4, dashboard + control + ปรับอัตราเงิน/จำนวนไม้ขาดทุนได้จากหน้าเว็บ)
 
-สืบเนื่องจาก v2 (hardened) เดิม เพิ่มเติมในเวอร์ชันนี้:
+สืบเนื่องจาก v3 (dashboard + control) เดิม เพิ่มเติมในเวอร์ชันนี้:
 
-1. หน้าเว็บ (/) เปลี่ยนจาก "Bot is running!" ธรรมดา เป็นแดชบอร์ดสไตล์ Claude AI
-   แสดงสถานะสด, ราคาปัจจุบัน, กำไร/ขาดทุน, และแถบสะสมข้อมูล 2 ชม.
-2. เลือกเหรียญที่จะเทรดได้จากหน้าเว็บ (จะสลับจริงก็ต่อเมื่อบอทไม่ได้ถือโพซิชันอยู่
-   — ถ้าถืออยู่ คำขอจะรอคิวจนกว่าจะขายเสร็จ เพื่อไม่ให้ตกหล่นการติดตามโพซิชันเดิม)
-3. ปุ่มหยุด/เริ่มเทรดต่อจากหน้าเว็บ (หยุด = ไม่เปิดออเดอร์ใหม่ แต่ไม่ได้บังคับขายของที่ถืออยู่)
-4. ตั้งรหัสผ่านป้องกันหน้าควบคุมได้ผ่าน ENV DASHBOARD_PASSWORD (แนะนำให้ตั้ง เพราะ URL นี้เปิดสู่สาธารณะ)
-5. เพิ่ม ENV SYMBOL (ไม่บังคับ) ใช้กำหนดเหรียญเริ่มต้นตอน deploy ครั้งแรก
-   หลังจากนั้นค่าที่ใช้จริงจะอ้างอิงจาก Firebase (bots_control/active_symbol) เป็นหลัก
+1. ปรับ "อัตราเงินที่ใช้เข้าซื้อต่อไม้" ได้จากหน้าเว็บ (% ของเงินบาทว่าง) แทนที่จะ fix ไว้ที่ 95% ตายตัว
+2. ปรับ "จำนวนไม้ขาดทุนติดกันก่อนหยุดเทรด (Circuit Breaker)" ได้จากหน้าเว็บ แทนที่จะ fix ไว้ที่ 3 ไม้ตายตัว
+3. ปุ่ม "ปลดล็อกตอนนี้" (ไม่ต้องรอข้ามวัน) มีอยู่แล้วตั้งแต่ v3 — ไม่ได้แก้เพิ่มในเวอร์ชันนี้
 
-ของเดิมจาก v2 (ยังอยู่ครบ ไม่ได้ตัดออก):
-- price_history สะสมจริงจาก Firebase (ไม่หายตอน restart)
-- คำนวณค่าธรรมเนียมเข้าไปในจุดตัดสินใจขาย (breakeven check)
-- จัดการ error code เฉพาะทาง (4005 / 4011 / 4019 / 4042) + retry/backoff
-- ยืนยันราคาจับคู่จริงด้วย retry-poll แทนการ sleep(3) แบบตายตัว
-- Circuit breaker (ขาดทุนสะสมรายวันเกินเพดาน / ขาดทุนติดกันหลายไม้)
-- Log ทุก request-uid ลงไฟล์ bot_transactions.log
-- ใช้ Decimal ปัดจำนวนเหรียญตาม quantityIncrement จริง
-- เช็ค minimum notional ก่อนส่งคำสั่งซื้อ
-- Graceful shutdown (Ctrl+C / SIGTERM) บันทึก state ก่อนปิดเสมอ
-- requests มี timeout ทุกครั้ง
+ของเดิมจาก v3 (ยังอยู่ครบ ไม่ได้ตัดออก): หน้าแดชบอร์ด, เลือกเหรียญจากหน้าเว็บ, ปุ่มหยุด/เริ่มเทรดต่อ,
+รหัสผ่านป้องกันหน้าควบคุม (DASHBOARD_PASSWORD), ปรับ % ขาดทุนสูงสุดต่อวันจากหน้าเว็บ,
+price_history สะสมจริงจาก Firebase, คำนวณค่าธรรมเนียมเข้าไปในจุดตัดสินใจขาย, จัดการ error code เฉพาะทาง,
+Circuit breaker, log ทุก request-uid, ใช้ Decimal ปัดจำนวนเหรียญ, เช็ค minimum notional, graceful shutdown
 
-⚠️ สมมติฐานที่ต้องตรวจสอบกับเอกสาร API ฉบับเต็มก่อนรันจริง (เหมือนเดิมจาก v2):
+⚠️ สมมติฐานที่ต้องตรวจสอบกับเอกสาร API ฉบับเต็มก่อนรันจริง (เหมือนเดิมจาก v3):
 - FEE_ESTIMATE_PATH ด้านล่าง: คู่มือพูดถึงฟีเจอร์ "Get Estimate Fee" แต่ไม่ได้ให้ path ตรงๆ
-  ผมตั้งตาม naming convention ของ endpoint อื่นที่มีอยู่แล้ว — ต้องยืนยันก่อนใช้จริง
+  ตั้งตาม naming convention ของ endpoint อื่นที่มีอยู่แล้ว — ต้องยืนยันก่อนใช้จริง
 - get_latest_price(): คู่มือเรียก ticker ว่า "Subscribe" และบอกว่าส่งข้อมูลทุก 1 นาที
-  ฟังดูเหมือน WebSocket push มากกว่า REST request/response ปกติ ถ้า endpoint นี้ใช้ไม่ได้
-  แบบ REST จริง ให้เปลี่ยนมาใช้ WebSocket client แทนการ poll ในฟังก์ชันนี้
+  ฟังดูเหมือน WebSocket push มากกว่า REST request/response ปกติ — ถ้า endpoint นี้ใช้แบบ REST จริงไม่ได้
+  ให้เปลี่ยนมาใช้ WebSocket client แทนการ poll ในฟังก์ชันนี้
 """
 
 import time
@@ -45,6 +33,7 @@ import threading
 import urllib.parse
 from string import Template
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
 import requests
 import firebase_admin
 from firebase_admin import credentials, db
@@ -62,9 +51,6 @@ logging.basicConfig(
 logger = logging.getLogger("InnovestXBot")
 
 # ==================== Firebase (state persistence) ====================
-# Render (และ host อื่นๆ ส่วนใหญ่) ลบไฟล์ในดิสก์ทิ้งทุกครั้งที่ deploy ใหม่/restart/
-# free-tier sleep แล้วตื่น — ของเดิมเก็บ state ไว้ในไฟล์บนดิสก์เฉยๆ พอ restart ข้อมูลหายหมด
-# → ย้ายไปเก็บบน Firebase Realtime Database แทน ข้อมูลอยู่ถาวร ไม่หายตอน restart
 def init_firebase():
     try:
         if not firebase_admin._apps:
@@ -75,35 +61,49 @@ def init_firebase():
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
 
-
 init_firebase()
 
 # ==================== การควบคุมบอทจากหน้าเว็บ ====================
-# เก็บที่ path "bot_control" (คนละอันกับ "bots/{symbol}/state" ที่เก็บสถานะการเทรดแต่ละเหรียญ)
 DEFAULT_SYMBOL = os.environ.get("SYMBOL", "BTCTHB").upper()
-
-# ตัวแปร global ให้ thread ของหน้าเว็บ (HTTP handler) รู้ว่าตอนนี้บอทกำลังรันเหรียญไหนอยู่จริงๆ
-# (ต่างจาก "active_symbol" ใน Firebase ซึ่งเป็นแค่คำขอ อาจยังไม่ถูก apply ถ้าบอทถือโพซิชันค้างอยู่)
 RUNNING_SYMBOL = {"value": DEFAULT_SYMBOL}
 
 
 def load_control():
-    """อ่านคำสั่งควบคุมล่าสุดจากหน้าเว็บ (เหรียญที่ต้องการ, หยุดชั่วคราวหรือไม่)"""
+    """อ่านคำสั่งควบคุมล่าสุดจากหน้าเว็บ (เหรียญที่ต้องการ, หยุดชั่วคราวหรือไม่, % ขาดทุนสูงสุดต่อวัน,
+    อัตราเงินที่ใช้เข้าซื้อต่อไม้, จำนวนไม้ขาดทุนติดกันก่อนหยุด)"""
     try:
         data = db.reference("bot_control").get() or {}
     except Exception as e:
         logger.warning(f"อ่าน bot_control จาก Firebase ไม่ได้ ใช้ค่าเริ่มต้น: {e}")
         data = {}
+
     try:
         max_daily_loss_percent = float(data.get("max_daily_loss_percent", InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT))
     except (TypeError, ValueError):
         max_daily_loss_percent = InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT
     if not (0.1 <= max_daily_loss_percent <= 100):
         max_daily_loss_percent = InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT
+
+    try:
+        trade_size_percent = float(data.get("trade_size_percent", InnovestXTradingBot.DEFAULT_TRADE_SIZE_PERCENT))
+    except (TypeError, ValueError):
+        trade_size_percent = InnovestXTradingBot.DEFAULT_TRADE_SIZE_PERCENT
+    if not (1 <= trade_size_percent <= 100):
+        trade_size_percent = InnovestXTradingBot.DEFAULT_TRADE_SIZE_PERCENT
+
+    try:
+        max_consecutive_losses = int(float(data.get("max_consecutive_losses", InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES)))
+    except (TypeError, ValueError):
+        max_consecutive_losses = InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES
+    if not (1 <= max_consecutive_losses <= 20):
+        max_consecutive_losses = InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES
+
     return {
         "active_symbol": (data.get("active_symbol") or DEFAULT_SYMBOL).upper(),
         "paused": bool(data.get("paused", False)),
         "max_daily_loss_percent": max_daily_loss_percent,
+        "trade_size_percent": trade_size_percent,
+        "max_consecutive_losses": max_consecutive_losses,
         "unlock_requested": bool(data.get("unlock_requested", False)),
     }
 
@@ -117,8 +117,9 @@ def save_control(control):
 
 class InnovestXTradingBot:
     # ---- ค่าคงที่ที่ปรับได้ ----
-    MAX_DAILY_LOSS_PERCENT = 5.0        # หยุดเทรดถ้าขาดทุนสะสมวันนี้เกิน % ของทุนเริ่มวัน
-    MAX_CONSECUTIVE_LOSSES = 3          # หยุดเทรดถ้าขาดทุนติดกันกี่ไม้
+    MAX_DAILY_LOSS_PERCENT = 5.0        # หยุดเทรดถ้าขาดทุนสะสมวันนี้เกิน % ของทุนเริ่มวัน (ปรับได้จากหน้าเว็บ)
+    MAX_CONSECUTIVE_LOSSES = 3          # หยุดเทรดถ้าขาดทุนติดกันกี่ไม้ (ปรับได้จากหน้าเว็บ)
+    DEFAULT_TRADE_SIZE_PERCENT = 95.0   # % ของเงินบาทว่างที่ใช้เข้าซื้อต่อไม้ (ปรับได้จากหน้าเว็บ)
     DEFAULT_ROUNDTRIP_FEE_PERCENT = 0.50  # fallback ถ้าดึงค่าธรรมเนียมจริงไม่ได้ (ปรับให้ตรงจริง!)
     MIN_ORDER_THB = 100.0
     MAX_ACCEPTABLE_SLIPPAGE_PERCENT = 1.0  # ถ้าราคาจริงเพี้ยนจากที่คาดเกิน % นี้จะแจ้งเตือน
@@ -132,22 +133,28 @@ class InnovestXTradingBot:
         self.api_secret = api_secret
         self.symbol = symbol
         self.base_currency = base_currency
-        # เดา target_currency จาก symbol อัตโนมัติถ้าไม่ได้ระบุ (ตัด base_currency ท้าย symbol ออก)
+
         if target_currency is None:
             target_currency = symbol[:-len(base_currency)] if symbol.endswith(base_currency) else symbol
         self.target_currency = target_currency
+
         self.host = "api.innovestxonline.com"
         self.base_url = f"https://{self.host}"
-        # path ที่เก็บ state บน Firebase — แยกตาม symbol กันชนกันถ้าเคยเทรดหลายเหรียญ
         self.state_path = f"bots/{symbol}/state"
+
         self.trailing_stop_percent = trailing_stop_percent
         self.stop_loss_percent = stop_loss_percent
+
         # ปรับได้จากหน้าเว็บระหว่างรัน (ไม่ต้อง restart) — ค่าเริ่มต้นใช้ค่าคงที่ของคลาสไปก่อน
-        # ตัวแปรนี้จะถูกอัปเดตจริงทุกรอบ loop ใน __main__ จากค่าที่เก็บบน Firebase (bot_control)
+        # ตัวแปรพวกนี้จะถูกอัปเดตจริงทุกรอบ loop ใน __main__ จากค่าที่เก็บบน Firebase (bot_control)
         self.max_daily_loss_percent = self.MAX_DAILY_LOSS_PERCENT
+        self.max_consecutive_losses = self.MAX_CONSECUTIVE_LOSSES
+        self.trade_size_percent = self.DEFAULT_TRADE_SIZE_PERCENT
+
         self._stop_requested = False
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
+
         self.state = self.load_state()
 
     # ==================== State management ====================
@@ -192,6 +199,7 @@ class InnovestXTradingBot:
         _, coin_free, _ = self.get_free_balance()
         rules = self.get_symbol_rules()
         dust_threshold = float(rules["quantity_increment"])
+
         if self.state["status"] == "HOLDING" and coin_free <= dust_threshold:
             logger.error(f"⚠️ RECONCILE MISMATCH: state บอก HOLDING แต่ในพอร์ตมีแค่ {coin_free} "
                          f"(อาจขายไปแล้วตอนบอทออฟไลน์) รีเซ็ตเป็น IDLE เพื่อความปลอดภัย")
@@ -214,6 +222,7 @@ class InnovestXTradingBot:
         timestamp = str(int(time.time() * 1000))
         request_uid = str(uuid.uuid4())
         content_type = "application/json"
+
         content_to_sign = (
             self.api_key + method.upper() + self.host + path + query +
             content_type + request_uid + timestamp + body_str
@@ -223,6 +232,7 @@ class InnovestXTradingBot:
             content_to_sign.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
+
         headers = {
             "Content-Type": content_type,
             "X-INVX-REQUEST-UID": request_uid,
@@ -230,6 +240,7 @@ class InnovestXTradingBot:
             "X-INVX-SIGNATURE": signature,
             "X-INVX-APIKEY": self.api_key,
         }
+
         try:
             if method.upper() == "GET":
                 response = requests.get(url, headers=headers, timeout=self.REQUEST_TIMEOUT_SEC)
@@ -261,6 +272,7 @@ class InnovestXTradingBot:
 
         code = data.get("code")
         logger.info(f"[UID {request_uid}] {method} {path} -> code={code}")
+
         if code == "4005":
             logger.error(f"[UID {request_uid}] 4005 Invalid Signature — ตรวจสอบลำดับ string-to-sign และ API Secret")
         elif code == "4011":
@@ -270,16 +282,14 @@ class InnovestXTradingBot:
             logger.warning(f"[UID {request_uid}] 4019 Insufficient Balance")
         elif code == "4042":
             logger.warning(f"[UID {request_uid}] 4042 Symbol not found — ตรวจสอบ symbol '{self.symbol}'")
+
         return data
 
     # ==================== Market data / price history ====================
     def get_latest_price(self):
         """ดึงราคาจับคู่ซื้อขายล่าสุดจริง (Last Trade Price) แบบเรียลไทม์จาก Level 2 Order Book"""
         path = "/api/v1/digital-asset/orderbook/lvl2"
-        body = {
-            "symbol": self.symbol,
-            "depth": 1
-        }
+        body = {"symbol": self.symbol, "depth": 1}
         res = self.send_request("POST", path, body=body)
         if res and res.get("code") == "0000":
             data = res.get("data")
@@ -324,27 +334,27 @@ class InnovestXTradingBot:
         if not history:
             return False
         return (time.time() - history[0][0]) >= 7200  # อย่างน้อย 2 ชั่วโมง
-      
+
     def _trend_confidence(self, current_price, price_1h_ago, price_2h_ago, price_3h_ago):
         """ทิศทางหลักดูจาก 1ชม.ล่าสุด แล้วให้คะแนนความมั่นใจเพิ่มจาก 2ชม./3ชม.ก่อนหน้า (50% ต่อชม.)"""
         if current_price is None or price_1h_ago is None or current_price == price_1h_ago:
             return None, 0
-   
+
         direction = "up" if current_price > price_1h_ago else "down"
         confidence = 0
-   
+
         if price_1h_ago is not None and price_2h_ago is not None:
             hour2_same_direction = (direction == "up" and price_1h_ago > price_2h_ago) or \
-                                   (direction == "down" and price_1h_ago < price_2h_ago)
+                                    (direction == "down" and price_1h_ago < price_2h_ago)
             if hour2_same_direction:
                 confidence += 50
-   
+
         if price_2h_ago is not None and price_3h_ago is not None:
             hour3_same_direction = (direction == "up" and price_2h_ago > price_3h_ago) or \
-                                   (direction == "down" and price_2h_ago < price_3h_ago)
+                                    (direction == "down" and price_2h_ago < price_3h_ago)
             if hour3_same_direction:
                 confidence += 50
-   
+
         return direction, confidence
 
     def get_symbol_rules(self):
@@ -391,6 +401,7 @@ class InnovestXTradingBot:
         total_value = dummy_amount * dummy_price
         body = {"symbol": self.symbol, "amount": dummy_amount, "price": dummy_price, "side": 0}
         res = self.send_request("POST", self.FEE_ESTIMATE_PATH, body=body)
+
         if res and res.get("code") == "0000":
             try:
                 order_fee_str = res["data"].get("orderFee", "0")
@@ -400,6 +411,7 @@ class InnovestXTradingBot:
                     return buy_fee_pct * 2  # คูณ 2 เพื่อประมาณการค่าฟีแบบไป-กลับ (ซื้อ + ขาย)
             except (KeyError, TypeError, ValueError) as e:
                 logger.warning(f"เกิดข้อผิดพลาดในการคำนวณค่าธรรมเนียมจริง: {e}")
+
         logger.warning(f"ดึงค่าธรรมเนียมจริงไม่ได้ ใช้ default {self.DEFAULT_ROUNDTRIP_FEE_PERCENT}% แทน "
                        f"(ควรตรวจสอบ FEE_ESTIMATE_PATH และพารามิเตอร์)")
         return self.DEFAULT_ROUNDTRIP_FEE_PERCENT
@@ -427,6 +439,7 @@ class InnovestXTradingBot:
                 if order.get("symbol") == self.symbol and order.get("orderState") == "Working":
                     has_pending_orders = True
                     break
+
         return thb_free, coin_free, has_pending_orders
 
     # ==================== Orders ====================
@@ -434,12 +447,14 @@ class InnovestXTradingBot:
         if side == 0 and value is not None and value < self.MIN_ORDER_THB:
             logger.warning(f"ยกเลิกคำสั่งซื้อ: มูลค่า {value} THB ต่ำกว่าขั้นต่ำ {self.MIN_ORDER_THB} THB")
             return None
+
         path = "/api/v1/digital-asset/order/send"
         body = {"symbol": self.symbol, "timeInForce": 1, "side": side, "orderType": 1}
         if side == 0 and value is not None:
             body["value"] = round(value, 2)
         elif side == 1 and quantity is not None:
             body["quantity"] = quantity
+
         logger.info(f"กำลังส่งคำสั่งเทรด: {'ซื้อ' if side == 0 else 'ขาย'} -> {body}")
         return self.send_request("POST", path, body=body)
 
@@ -447,6 +462,7 @@ class InnovestXTradingBot:
         """Poll ยืนยันราคาเฉลี่ยที่ match จริง แทนการ sleep คงที่"""
         path = "/api/v1/digital-asset/order/history/inquiry"
         body = {"symbol": self.symbol, "orderId": order_id}
+
         for attempt in range(1, max_attempts + 1):
             res = self.send_request("POST", path, body=body)
             if res and res.get("code") == "0000":
@@ -457,6 +473,7 @@ class InnovestXTradingBot:
                         return avg_price
             logger.info(f"รอ order {order_id} matching... (ครั้งที่ {attempt}/{max_attempts})")
             time.sleep(delay_sec)
+
         logger.warning(f"ไม่สามารถยืนยันราคาเฉลี่ยของ order {order_id} ได้หลัง {max_attempts} ครั้ง")
         return 0.0
 
@@ -502,8 +519,8 @@ class InnovestXTradingBot:
         halt_reason = None
         if daily_loss_percent >= self.max_daily_loss_percent:
             halt_reason = f"ขาดทุนสะสมวันนี้ {daily_loss_percent:.2f}% เกินเพดาน {self.max_daily_loss_percent}%"
-        elif self.state["consecutive_losses"] >= self.MAX_CONSECUTIVE_LOSSES:
-            halt_reason = f"ขาดทุนติดกัน {self.state['consecutive_losses']} ไม้ ถึงเพดาน {self.MAX_CONSECUTIVE_LOSSES} ไม้"
+        elif self.state["consecutive_losses"] >= self.max_consecutive_losses:
+            halt_reason = f"ขาดทุนติดกัน {self.state['consecutive_losses']} ไม้ ถึงเพดาน {self.max_consecutive_losses} ไม้"
 
         if halt_reason:
             self.state["status"] = "HALTED"
@@ -519,33 +536,33 @@ class InnovestXTradingBot:
 
         if self.state["status"] == "IDLE":
             logger.info(f"สถานะ IDLE กำลังวิเคราะห์ราคาปัจจุบัน: {current_price} THB")
+
             if not self._has_enough_history():
                 logger.info("ข้อมูลราคาย้อนหลังยังไม่ครบ 2 ชั่วโมง รอสะสมข้อมูลต่อ")
                 return
 
-        price_1h_ago = self._price_at_offset(3600)
-        price_2h_ago = self._price_at_offset(7200)
-        price_3h_ago = self._price_at_offset(10800)
-        price_open_1h = self._price_open_current_hour()
-         
-        if price_1h_ago is None or price_open_1h is None:
-            logger.info("ข้อมูลราคาบางช่วงขาดหาย (gap) รอรอบถัดไป")
-            return
-         
-        direction, confidence = self._trend_confidence(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
-        rule_current_hour_green = current_price > price_open_1h
-         
-        logger.info(f"ทิศทาง 1ชม: {direction or 'flat'} (ยืนยัน {confidence}%) | ชม.นี้เขียว: {rule_current_hour_green}")
-         
-        if direction == "down":
-            logger.info(f"⚠️ เห็นสัญญาณขาลง (ยืนยัน {confidence}%) --- ข้ามรอบนี้ ไม่เข้าซื้อ")
-            return
-         
-        MIN_CONFIDENCE_TO_BUY = 50  # ต้องมี 2ชม. หรือ 3ชม. ยืนยันทิศทางเดียวกันอย่างน้อย 1 ใน 2 (ปรับตัวเลขนี้ได้เลย)
-         
-        if direction != "up" or confidence < MIN_CONFIDENCE_TO_BUY or not rule_current_hour_green:
-            return
-            
+            price_1h_ago = self._price_at_offset(3600)
+            price_2h_ago = self._price_at_offset(7200)
+            price_3h_ago = self._price_at_offset(10800)
+            price_open_1h = self._price_open_current_hour()
+
+            if price_1h_ago is None or price_open_1h is None:
+                logger.info("ข้อมูลราคาบางช่วงขาดหาย (gap) รอรอบถัดไป")
+                return
+
+            direction, confidence = self._trend_confidence(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
+            rule_current_hour_green = current_price > price_open_1h
+
+            logger.info(f"ทิศทาง 1ชม: {direction or 'flat'} (ยืนยัน {confidence}%) | ชม.นี้เขียว: {rule_current_hour_green}")
+
+            if direction == "down":
+                logger.info(f"⚠️ เห็นสัญญาณขาลง (ยืนยัน {confidence}%) — ข้ามรอบนี้ ไม่เข้าซื้อ")
+                return
+
+            MIN_CONFIDENCE_TO_BUY = 50  # ต้องมี 2ชม. หรือ 3ชม. ยืนยันทิศทางเดียวกันอย่างน้อย 1 ใน 2 (ปรับตัวเลขนี้ได้เลย)
+            if direction != "up" or confidence < MIN_CONFIDENCE_TO_BUY or not rule_current_hour_green:
+                return
+
             thb_free, _, has_pending = self.get_free_balance()
             if has_pending:
                 logger.info("ข้ามการซื้อ: มีออเดอร์ค้างอยู่ในระบบ")
@@ -555,22 +572,27 @@ class InnovestXTradingBot:
                 return
 
             rules = self.get_symbol_rules()
-            buy_value = round(thb_free * 0.95, 2)
+            # อัตราเงินที่ใช้เข้าซื้อต่อไม้ ปรับได้จากหน้าเว็บ (self.trade_size_percent) ค่าเริ่มต้น 95%
+            buy_value = round(thb_free * (self.trade_size_percent / 100.0), 2)
             order_res = self.execute_market_order(side=0, value=buy_value)
+
             if not (order_res and order_res.get("code") == "0000"):
                 logger.warning(f"ยิงออเดอร์ซื้อล้มเหลว: {order_res}")
                 return
 
             order_id = order_res["data"]["orderId"]
             logger.info(f"✔ ส่งคำสั่งซื้อสำเร็จ Order ID: {order_id} กำลังยืนยันราคาจับคู่จริง...")
+
             avg_price = self.confirm_fill_price(order_id)
             if avg_price == 0.0:
                 avg_price = current_price
                 logger.warning("ยืนยันราคาจับคู่จริงไม่ได้ ใช้ราคาตลาด ณ ขณะนั้นแทน (ควรตรวจสอบ order ด้วยมือ)")
+
             self._check_slippage(current_price, avg_price, "ซื้อ")
 
             estimated_qty = self._floor_to_increment(buy_value / avg_price, rules["quantity_increment"])
             fee_pct = self.estimate_roundtrip_fee_percent()
+
             self.state.update({
                 "status": "HOLDING",
                 "entry_price": avg_price,
@@ -579,6 +601,7 @@ class InnovestXTradingBot:
                 "roundtrip_fee_percent": fee_pct,
             })
             self.save_state()
+
             logger.info(f"🎉 ซื้อสำเร็จ ต้นทุนเฉลี่ย {avg_price} THB จำนวน {estimated_qty} "
                         f"(ค่าธรรมเนียม round-trip โดยประมาณ {fee_pct:.3f}%)")
 
@@ -587,6 +610,7 @@ class InnovestXTradingBot:
             highest_price = self.state["highest_price"]
             qty = self.state["quantity"]
             fee_pct = self.state.get("roundtrip_fee_percent", self.DEFAULT_ROUNDTRIP_FEE_PERCENT)
+
             logger.info(f"สถานะ HOLDING ต้นทุน {entry_price} THB ราคาปัจจุบัน {current_price} THB")
 
             if current_price > highest_price:
@@ -614,9 +638,11 @@ class InnovestXTradingBot:
         if has_pending:
             logger.info("ข้ามการขาย: มีออเดอร์ค้างอยู่ในระบบ")
             return
+
         sell_qty = min(qty, coin_free)
         rules = self.get_symbol_rules()
         sell_qty = self._floor_to_increment(sell_qty, rules["quantity_increment"])
+
         if sell_qty <= 0:
             logger.warning(f"ไม่มียอดเหรียญ {self.target_currency} พร้อมขาย (คงเหลือจริง {coin_free})")
             return
@@ -628,13 +654,16 @@ class InnovestXTradingBot:
 
         order_id = order_res["data"]["orderId"]
         sell_avg_price = self.confirm_fill_price(order_id)
+
         if sell_avg_price > 0 and current_price is not None:
             self._check_slippage(current_price, sell_avg_price, "ขาย")
 
         entry_price = self.state["entry_price"]
         pnl_thb = (sell_avg_price - entry_price) * sell_qty if sell_avg_price > 0 else 0.0
+
         if sell_avg_price == 0.0:
             logger.warning("ยืนยันราคาขายจริงไม่ได้ — ข้าม PnL tracking รอบนี้ (ตรวจสอบ order ด้วยมือ)")
+
         logger.info(f"✔ ขายสำเร็จ ราคาเฉลี่ย {sell_avg_price or 'N/A'} PnL รอบนี้ {pnl_thb:.2f} THB")
 
         self.state.update({"status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
@@ -644,9 +673,11 @@ class InnovestXTradingBot:
     def run_once(self):
         """รันหนึ่งรอบของ loop หลัก (ไม่ sleep) — เรียกจาก run() หรือจาก supervisor loop ใน __main__"""
         self._maybe_reset_daily_counters()
+
         if self.state["status"] == "HALTED":
             logger.warning("⛔ บอทอยู่ในสถานะ HALTED จาก Circuit Breaker — เฝ้าดูอย่างเดียว ไม่ส่งคำสั่งใหม่")
             return
+
         price = self.get_latest_price()
         if price is not None:
             self._record_price_tick(price)
@@ -656,20 +687,22 @@ class InnovestXTradingBot:
         """เรียกใช้ตรงๆ ได้ถ้าไม่ต้องการ dashboard control (เทรดเหรียญเดียวตลอด ไม่มีปุ่มหยุด)"""
         logger.info(f"เริ่มบอทเทรด {self.symbol} (poll ทุก {poll_interval_sec} วิ) — กด Ctrl+C เพื่อหยุดอย่างปลอดภัย")
         self.reconcile_state_on_startup()
+
         while not self._stop_requested:
             try:
                 self.run_once()
             except Exception:
                 logger.exception("เกิดข้อผิดพลาดไม่คาดคิดใน main loop — บอทจะพยายามทำงานต่อในรอบถัดไป")
+
             for _ in range(poll_interval_sec):
                 if self._stop_requested:
                     break
                 time.sleep(1)
+
         logger.info("บอทหยุดทำงานเรียบร้อย (state ถูกบันทึกแล้ว)")
 
 
 # ==================== Dashboard (หน้าเว็บสถานะ + ควบคุมบอท) ====================
-
 DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
 <html lang="th">
 <head>
@@ -760,21 +793,17 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
       </div>
       <div class="status-pill ${status_class}"><span class="dot"></span> ${status_label}</div>
     </header>
-
     <section class="hero">
       <div class="hero-label">ราคาปัจจุบัน (${symbol_display})</div>
       <div class="hero-price">${hero_price}</div>
       ${hero_delta_html}
       ${freshness_html}
     </section>
-
     ${banners_html}
     ${progress_html}
-
     <div class="grid">
       ${cards_html}
     </div>
-
     <section class="control">
       <div class="control-title">ควบคุมบอท</div>
       ${unlock_button_html}
@@ -800,6 +829,24 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
         ${password_field_html}
         <button type="submit" class="btn btn-accent" style="margin-top:10px;">เปลี่ยนเหรียญ</button>
       </form>
+      <form class="control-row" method="POST" action="/control/trade_size" style="flex-direction:column; align-items:stretch;">
+        <div class="control-info">
+          <div class="control-label">อัตราเงินที่ใช้เข้าซื้อต่อไม้ (กำลังตั้ง: ${trade_size_percent}% ของเงินว่าง)</div>
+          <input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="100" name="trade_size_percent" value="${trade_size_percent}">
+          <div class="control-sub" style="margin-top:6px;">เช่น ตั้ง 50 = ใช้เงินบาทว่างครึ่งหนึ่งเข้าซื้อทุกครั้งที่มีสัญญาณ ที่เหลือจะไม่ถูกแตะ</div>
+        </div>
+        ${password_field_html}
+        <button type="submit" class="btn btn-accent" style="margin-top:10px;">บันทึกค่า</button>
+      </form>
+      <form class="control-row" method="POST" action="/control/max_losses" style="flex-direction:column; align-items:stretch;">
+        <div class="control-info">
+          <div class="control-label">ขาดทุนติดกันกี่ไม้ถึงหยุด (กำลังตั้ง: ${max_consecutive_losses} ไม้)</div>
+          <input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="20" name="max_consecutive_losses" value="${max_consecutive_losses}">
+          <div class="control-sub" style="margin-top:6px;">ถ้าขาดทุนติดต่อกันครบจำนวนนี้ บอทจะหยุดเทรด (HALTED) ทันที</div>
+        </div>
+        ${password_field_html}
+        <button type="submit" class="btn btn-accent" style="margin-top:10px;">บันทึกค่า</button>
+      </form>
       <form class="control-row" method="POST" action="/control/risk" style="flex-direction:column; align-items:stretch;">
         <div class="control-info">
           <div class="control-label">ขาดทุนสูงสุดที่ยอมรับต่อวัน (กำลังตั้ง: ${max_daily_loss_percent}%)</div>
@@ -810,7 +857,6 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
         <button type="submit" class="btn btn-accent" style="margin-top:10px;">บันทึกค่า</button>
       </form>
     </section>
-
     <footer>
       <span>อัปเดตล่าสุด ${last_updated}</span>
       <span class="sep">·</span>
@@ -844,12 +890,14 @@ def render_dashboard(running_symbol, state, control):
     daily_start = float(state.get("daily_start_balance", 0.0) or 0.0)
     consecutive_losses = int(state.get("consecutive_losses", 0) or 0)
     price_history = state.get("price_history", []) or []
-
     current_price = price_history[-1][1] if price_history else None
     last_price_ts = price_history[-1][0] if price_history else None
+
     now = time.time()
     price_age_sec = (now - last_price_ts) if last_price_ts is not None else None
     PRICE_STALE_THRESHOLD_SEC = 150  # เกิน ~2.5 เท่าของ poll interval (60วิ) ถือว่าเก่าเกินไป น่าสงสัย
+
+    active_max_consecutive_losses = control.get("max_consecutive_losses", InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES)
 
     # ---- status pill ----
     status_map = {
@@ -863,7 +911,7 @@ def render_dashboard(running_symbol, state, control):
         whole, _, dec = f"{current_price:,.2f}".partition(".")
         hero_price = f"฿{whole}<span class=\"hero-decimal\">.{dec}</span>"
     else:
-        hero_price = "฿—"
+        hero_price = "฿---"
 
     # ---- ความสดของราคา (แยกจากเวลา render หน้า) ----
     freshness_html = ""
@@ -891,13 +939,14 @@ def render_dashboard(running_symbol, state, control):
         age_min = int(price_age_sec // 60)
         banners.append(f'<div class="banner banner-danger">⚠️ ราคาที่แสดงอาจไม่ใช่ราคาสด (เก่าไปแล้ว {age_min}+ นาที) — ตรวจสอบ log บน Render ว่าดึงราคาล้มเหลวซ้ำๆ หรือไม่</div>')
 
+    reason = ""
     if status == "HALTED":
         active_threshold = control.get("max_daily_loss_percent", InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT)
         daily_loss_percent = -daily_pnl / daily_start * 100 if daily_start > 0 else 0.0
         if daily_loss_percent >= active_threshold:
             reason = f"ขาดทุนสะสมวันนี้เกิน {active_threshold:.1f}%"
-        elif consecutive_losses >= InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES:
-            reason = f"ขาดทุนติดกัน {consecutive_losses} ไม้ ครบเพดาน {InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES} ไม้"
+        elif consecutive_losses >= active_max_consecutive_losses:
+            reason = f"ขาดทุนติดกัน {consecutive_losses} ไม้ ครบเพดาน {active_max_consecutive_losses} ไม้"
         else:
             reason = "Circuit breaker ทำงาน (ดูรายละเอียดใน log)"
         banners.append(f'<div class="banner banner-danger">🛑 บอทหยุดเทรดชั่วคราว — {reason} (ปลดล็อกอัตโนมัติวันถัดไป หรือกดปลดล็อกเองด้านล่าง)</div>')
@@ -925,7 +974,7 @@ def render_dashboard(running_symbol, state, control):
             minutes_done = int(elapsed // 60)
             minutes_left = max(0, 120 - minutes_done)
             sub = f"{minutes_done} / 120 นาที · เหลืออีกประมาณ {minutes_left} นาที" if price_history else \
-                  "ยังไม่มีข้อมูลราคาเลย รอรอบแรกของบอท (ทุก 60 วินาที)"
+                "ยังไม่มีข้อมูลราคาเลย รอรอบแรกของบอท (ทุก 60 วินาที)"
             progress_html = (
                 '<section class="progress-card">'
                 '<div class="progress-label">กำลังสะสมข้อมูลราคา (ต้องครบ 2 ชั่วโมงก่อนเริ่มวิเคราะห์สัญญาณซื้อ)</div>'
@@ -946,13 +995,14 @@ def render_dashboard(running_symbol, state, control):
         cards.append(_render_card("ค่าธรรมเนียม (ประมาณ)", f"{fee_pct:.2f}%", value_class="accent"))
         cards.append(_render_card("กำไรวันนี้ (รับรู้แล้ว)", f"{'+' if daily_pnl >= 0 else ''}{_fmt_thb(daily_pnl)} ฿",
                                    value_class="positive" if daily_pnl >= 0 else "negative"))
-        cards.append(_render_card("ขาดทุนติดกัน", f"{consecutive_losses} / {InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES} ไม้"))
+        cards.append(_render_card("ขาดทุนติดกัน", f"{consecutive_losses} / {active_max_consecutive_losses} ไม้"))
     else:
         cards.append(_render_card("กำไรวันนี้ (รับรู้แล้ว)", f"{'+' if daily_pnl >= 0 else ''}{_fmt_thb(daily_pnl)} ฿",
                                    value_class="positive" if daily_pnl >= 0 else "negative"))
         cards.append(_render_card("ทุนเริ่มต้นวันนี้", f"{_fmt_thb(daily_start)} ฿"))
-        cards.append(_render_card("ขาดทุนติดกัน", f"{consecutive_losses} / {InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES} ไม้"))
+        cards.append(_render_card("ขาดทุนติดกัน", f"{consecutive_losses} / {active_max_consecutive_losses} ไม้"))
         cards.append(_render_card("ค่าธรรมเนียม (ประมาณล่าสุด)", f"{fee_pct:.2f}%", value_class="accent"))
+
     cards_html = "".join(cards)
 
     # ---- control panel state ----
@@ -974,13 +1024,13 @@ def render_dashboard(running_symbol, state, control):
     unlock_button_html = ""
     if status == "HALTED":
         unlock_button_html = f'''<form class="control-row" method="POST" action="/control/unlock">
-        <div class="control-info">
-          <div class="control-label">บอทถูกล็อกอยู่ (HALTED)</div>
-          <div class="control-sub">{reason}</div>
-        </div>
-        {password_field_html}
-        <button type="submit" class="btn btn-danger">🔓 ปลดล็อกตอนนี้</button>
-      </form>'''
+      <div class="control-info">
+        <div class="control-label">บอทถูกล็อกอยู่ (HALTED)</div>
+        <div class="control-sub">{reason}</div>
+      </div>
+      {password_field_html}
+      <button type="submit" class="btn btn-danger">🔓 ปลดล็อกตอนนี้</button>
+    </form>'''
 
     return DASHBOARD_TEMPLATE.safe_substitute(
         symbol_display=f"{running_symbol[:-3]}/{running_symbol[-3:]}" if running_symbol.endswith("THB") else running_symbol,
@@ -999,6 +1049,8 @@ def render_dashboard(running_symbol, state, control):
         running_symbol=running_symbol,
         symbol_input_value=control.get("active_symbol", running_symbol),
         max_daily_loss_percent=control.get("max_daily_loss_percent", InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT),
+        trade_size_percent=control.get("trade_size_percent", InnovestXTradingBot.DEFAULT_TRADE_SIZE_PERCENT),
+        max_consecutive_losses=active_max_consecutive_losses,
         password_field_html=password_field_html,
         last_updated=last_updated,
     )
@@ -1046,6 +1098,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 control["paused"] = not control.get("paused", False)
                 save_control(control)
                 logger.info(f"[เว็บควบคุม] ตั้งค่า paused={control['paused']}")
+
             elif self.path == "/control/symbol":
                 requested = fields.get("symbol", [""])[0].strip().upper()
                 if re.match(r"^[A-Z0-9]{2,20}$", requested):
@@ -1055,6 +1108,35 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                     logger.info(f"[เว็บควบคุม] คำขอเปลี่ยนเหรียญเป็น {requested}")
                 else:
                     logger.warning(f"[เว็บควบคุม] ปฏิเสธคำขอเปลี่ยนเหรียญ: รูปแบบไม่ถูกต้อง ({requested})")
+
+            elif self.path == "/control/trade_size":
+                raw_value = fields.get("trade_size_percent", [""])[0].strip()
+                try:
+                    value = float(raw_value)
+                except ValueError:
+                    value = None
+                if value is not None and 1 <= value <= 100:
+                    control = load_control()
+                    control["trade_size_percent"] = value
+                    save_control(control)
+                    logger.info(f"[เว็บควบคุม] ตั้งค่าอัตราเงินที่ใช้เข้าซื้อต่อไม้เป็น {value}%")
+                else:
+                    logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าอัตราเงินที่ใช้เข้าซื้อ: '{raw_value}' (ต้องอยู่ระหว่าง 1-100)")
+
+            elif self.path == "/control/max_losses":
+                raw_value = fields.get("max_consecutive_losses", [""])[0].strip()
+                try:
+                    value = int(float(raw_value))
+                except ValueError:
+                    value = None
+                if value is not None and 1 <= value <= 20:
+                    control = load_control()
+                    control["max_consecutive_losses"] = value
+                    save_control(control)
+                    logger.info(f"[เว็บควบคุม] ตั้งค่าจำนวนไม้ขาดทุนติดกันก่อนหยุดเป็น {value} ไม้")
+                else:
+                    logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าจำนวนไม้ขาดทุนติดกัน: '{raw_value}' (ต้องอยู่ระหว่าง 1-20)")
+
             elif self.path == "/control/risk":
                 raw_value = fields.get("max_daily_loss_percent", [""])[0].strip()
                 try:
@@ -1068,6 +1150,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                     logger.info(f"[เว็บควบคุม] ตั้งค่าขาดทุนสูงสุดต่อวันเป็น {value}%")
                 else:
                     logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าขาดทุนสูงสุดต่อวัน: '{raw_value}' (ต้องอยู่ระหว่าง 0.1-100)")
+
             elif self.path == "/control/unlock":
                 control = load_control()
                 control["unlock_requested"] = True
@@ -1106,11 +1189,12 @@ if __name__ == "__main__":
 
     control = load_control()
     save_control(control)  # เขียนกลับให้ path บน Firebase มีค่าเริ่มต้นแน่นอนตั้งแต่แรก
+
     current_symbol = control["active_symbol"]
     RUNNING_SYMBOL["value"] = current_symbol
-
     bot = InnovestXTradingBot(api_key=api_key, api_secret=api_secret, symbol=current_symbol)
     bot.reconcile_state_on_startup()
+
     logger.info(f"เริ่มบอทเทรด {current_symbol} (poll ทุก {POLL_INTERVAL_SEC} วิ) — กด Ctrl+C เพื่อหยุดอย่างปลอดภัย")
 
     stop_all = False
@@ -1132,6 +1216,16 @@ if __name__ == "__main__":
         if bot.max_daily_loss_percent != control["max_daily_loss_percent"]:
             logger.info(f"🔧 ปรับเพดานขาดทุนต่อวันจาก {bot.max_daily_loss_percent}% เป็น {control['max_daily_loss_percent']}% (สั่งจากหน้าเว็บ)")
             bot.max_daily_loss_percent = control["max_daily_loss_percent"]
+
+        # --- ซิงค์อัตราเงินที่ใช้เข้าซื้อต่อไม้จากหน้าเว็บ (มีผลทันที ไม่ต้อง restart) ---
+        if bot.trade_size_percent != control["trade_size_percent"]:
+            logger.info(f"🔧 ปรับอัตราเงินที่ใช้เข้าซื้อจาก {bot.trade_size_percent}% เป็น {control['trade_size_percent']}% (สั่งจากหน้าเว็บ)")
+            bot.trade_size_percent = control["trade_size_percent"]
+
+        # --- ซิงค์จำนวนไม้ขาดทุนติดกันก่อนหยุดจากหน้าเว็บ (มีผลทันที ไม่ต้อง restart) ---
+        if bot.max_consecutive_losses != control["max_consecutive_losses"]:
+            logger.info(f"🔧 ปรับจำนวนไม้ขาดทุนติดกันก่อนหยุดจาก {bot.max_consecutive_losses} เป็น {control['max_consecutive_losses']} ไม้ (สั่งจากหน้าเว็บ)")
+            bot.max_consecutive_losses = control["max_consecutive_losses"]
 
         # --- เช็คคำขอปลดล็อก (HALTED -> IDLE) จากหน้าเว็บ ---
         # แก้ค่าตรงที่ bot.state ในหน่วยความจำเลย (ไม่ใช่แค่บน Firebase) เพราะบอทที่รันอยู่
@@ -1161,4 +1255,3 @@ if __name__ == "__main__":
             time.sleep(1)
 
     logger.info("บอทหยุดทำงานเรียบร้อย (state ถูกบันทึกแล้ว)")
-
