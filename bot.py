@@ -645,11 +645,11 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
 <title>${symbol_display} Bot Dashboard</title>
 <style>
   :root {
-    --bg: #F0EEE6; --card: #FFFFFF; --border: #E4E0D3;
-    --text: #2B2822; --text-soft: #86806F;
-    --accent: #D97757; --accent-soft: #F1DFD2;
-    --green: #5C8A6A; --green-soft: #E3EBDF;
-    --red: #C0574A; --red-soft: #F5DFDA;
+    --bg: #1E1C18; --card: #2A2822; --border: #3D3A32;
+    --text: #EDE9DD; --text-soft: #9C9585;
+    --accent: #E08A65; --accent-soft: #3D2C22;
+    --green: #85B893; --green-soft: #24332A;
+    --red: #E08277; --red-soft: #3A2523;
   }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased; min-height:100vh; display:flex; justify-content:center; padding:0 0 40px; }
@@ -662,7 +662,7 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .brand-sub { font-size:12px; color:var(--text-soft); margin-top:1px; }
   .status-pill { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border-radius:999px; font-size:12px; font-weight:600; letter-spacing:0.02em; }
   .status-holding { background:var(--green-soft); color:var(--green); }
-  .status-idle { background:#EDEBE1; color:var(--text-soft); }
+  .status-idle { background:#33312A; color:var(--text-soft); }
   .status-halted { background:var(--red-soft); color:var(--red); }
   .dot { width:7px; height:7px; border-radius:50%; background:currentColor; }
   .status-holding .dot { animation:pulse 1.8s ease-in-out infinite; }
@@ -679,10 +679,10 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .banner { margin:0 20px 12px; padding:12px 14px; border-radius:12px; font-size:13px; font-weight:600; line-height:1.5; }
   .banner-danger { background:var(--red-soft); color:var(--red); }
   .banner-info { background:var(--accent-soft); color:var(--accent); }
-  .banner-warning { background:#F3E9CE; color:#8A6A1F; }
+  .banner-warning { background:#3D3420; color:#E8C468; }
   .progress-card { margin:0 20px 16px; background:var(--card); border:1px solid var(--border); border-radius:16px; padding:14px 16px; }
   .progress-label { font-size:12px; color:var(--text-soft); font-weight:600; }
-  .progress-bar { margin-top:8px; height:8px; border-radius:999px; background:#EDEBE1; overflow:hidden; }
+  .progress-bar { margin-top:8px; height:8px; border-radius:999px; background:#33312A; overflow:hidden; }
   .progress-fill { height:100%; background:var(--accent); border-radius:999px; transition:width .3s ease; }
   .progress-sub { margin-top:6px; font-size:12px; color:var(--text-soft); }
   .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:0 20px; }
@@ -707,7 +707,7 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .password-input { width:100%; margin-top:8px; padding:9px 10px; border:1px solid var(--border); border-radius:10px; font-size:13px; background:var(--bg); color:var(--text); }
   .btn { border:none; border-radius:10px; padding:10px 16px; font-size:13px; font-weight:700; cursor:pointer; white-space:nowrap; }
   .btn-accent { background:var(--accent); color:#fff; }
-  .btn-neutral { background:#EDEBE1; color:var(--text); }
+  .btn-neutral { background:#33312A; color:var(--text); }
   .btn-danger { background:var(--red); color:#fff; }
   footer { display:flex; align-items:center; justify-content:center; gap:8px; margin-top:20px; font-size:12px; color:var(--text-soft); }
   .sep { opacity:.5; }
