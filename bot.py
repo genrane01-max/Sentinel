@@ -901,7 +901,8 @@ ${unlock_button_html}
 <div class="control-label">การเทรดอัตโนมัติ</div>
 <div class="control-sub">${pause_sub}</div>
 </div>
-<button type="submit" class="btn ${pause_btn_class} btn-sm">${pause_btn_label}</button>
+${password_field_html}
+<button type="submit" class="btn ${pause_btn_class}">${pause_btn_label}</button>
 </div>
 </form>
 
