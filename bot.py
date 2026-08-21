@@ -619,7 +619,18 @@ class InnovestXTradingBot:
                 time.sleep(1)
 
         logger.info("บอทหยุดทำงานเรียบร้อย (state ถูกบันทึกแล้ว)")
+        
+        # ==================== Web Service Dummy Port (สำหรับ Render) ====================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
 
+def start_dummy_health_check_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
 
 if __name__ == "__main__":
     api_key = os.environ.get("INVX_API_KEY")
