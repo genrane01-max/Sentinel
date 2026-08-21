@@ -906,7 +906,7 @@ ${unlock_button_html}
 </form>
 
 <form class="control-card" method="POST" action="/control/symbol">
-<div class="label-row"><span class="control-icon">💱</span>
+<div class="label-row"><span class="control-icon">🪙</span>
 <div class="control-label">เหรียญที่เทรด (กำลังรัน: ${running_symbol})</div>
 </div>
 <input class="symbol-input" type="text" name="symbol" value="${symbol_input_value}"
