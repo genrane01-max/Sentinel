@@ -274,46 +274,23 @@ class InnovestXTradingBot:
 
     # ==================== Market data / price history ====================
     def get_latest_price(self):
-        """ดึงราคาล่าสุดแบบเรียลไทม์ = mid-price ของ best bid/ask จาก Level 2 Order Book"""
+        """ดึงราคาจับคู่ซื้อขายล่าสุดจริง (Last Trade Price) แบบเรียลไทม์จาก Level 2 Order Book"""
         path = "/api/v1/digital-asset/orderbook/lvl2"
-        body = {"symbol": self.symbol, "depth": 1}
+        body = {
+            "symbol": self.symbol,
+            "depth": 1
+        }
         res = self.send_request("POST", path, body=body)
-        if not (res and res.get("code") == "0000"):
-            return None
-
-        data = res.get("data")
-
-        def _first_price(levels):
-            if not levels:
-                return None
-            row = levels[0]
-            if isinstance(row, dict):
-                for key in ("price", "px", "p"):
-                    if key in row:
-                        try:
-                            return float(row[key])
-                        except (TypeError, ValueError):
-                            return None
-            elif isinstance(row, (list, tuple)) and row:
-                try:
-                    return float(row[0])
-                except (TypeError, ValueError):
-                    return None
-            return None
-
-        record = data if isinstance(data, dict) else (data[0] if isinstance(data, list) and data else {})
-        bids = record.get("bids") or record.get("bid")
-        asks = record.get("asks") or record.get("ask")
-        best_bid = _first_price(bids)
-        best_ask = _first_price(asks)
-
-        if best_bid and best_ask:
-            return (best_bid + best_ask) / 2
-        if best_bid or best_ask:
-            return best_bid or best_ask
-
-        # ยังพาร์สไม่ได้ -> log โครงสร้างจริงไว้ดู เพื่อจะได้แก้ field name ให้ตรงเป๊ะในรอบถัดไป
-        logger.warning(f"ดึงราคาจาก orderbook ไม่ได้ โครงสร้างข้อมูลไม่ตรงที่คาด: {data}")
+        if res and res.get("code") == "0000":
+            data = res.get("data")
+            if isinstance(data, list) and data:
+                first_record = data[0]
+                if isinstance(first_record, dict) and "lastTradePrice" in first_record:
+                    try:
+                        return float(first_record["lastTradePrice"])
+                    except (TypeError, ValueError):
+                        pass
+        logger.warning("ดึงราคาล่าสุดเรียลไทม์ (lastTradePrice) ล้มเหลว")
         return None
 
     def _record_price_tick(self, price):
