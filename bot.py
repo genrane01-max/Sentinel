@@ -128,7 +128,7 @@ class InnovestXTradingBot:
     FEE_ESTIMATE_PATH = "/api/v1/digital-asset/order/fee/inquiry"
 
     def __init__(self, api_key, api_secret, symbol="BTCTHB", base_currency="THB",
-                 target_currency=None, trailing_stop_percent=2.0, stop_loss_percent=1.5):
+                 target_currency=None, trailing_stop_percent=2.0, stop_loss_percent=3):
         self.api_key = api_key
         self.api_secret = api_secret
         self.symbol = symbol
