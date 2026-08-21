@@ -31,6 +31,8 @@ import signal
 import logging
 import requests
 import firebase_admin
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from firebase_admin import credentials, db
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
