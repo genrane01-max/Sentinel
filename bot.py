@@ -30,6 +30,8 @@ import os
 import signal
 import logging
 import requests
+import firebase_admin
+from firebase_admin import credentials, db
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
@@ -42,6 +44,25 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("InnovestXBot")
+
+# ==================== Firebase (state persistence) ====================
+# Render (และ host อื่นๆ ส่วนใหญ่) ลบไฟล์ในดิสก์ทิ้งทุกครั้งที่ deploy ใหม่/restart/
+# free-tier sleep แล้วตื่น — ของเดิมเก็บ state (status, entry_price, quantity, ตัวนับ
+# circuit breaker ฯลฯ) ไว้ในไฟล์ bot_state.json บนดิสก์เฉยๆ พอ restart ทีนึงข้อมูลหายหมด
+# บอทจะคิดว่าตัวเองว่าง (IDLE) ทั้งที่จริงถือเหรียญอยู่ หรือลืมไปแล้วว่าวันนี้ HALTED เพราะ
+# ขาดทุนเกินเพดานไปแล้ว → ย้ายไปเก็บบน Firebase Realtime Database แทน ข้อมูลอยู่ถาวร
+# ไม่หายตอน restart
+def init_firebase():
+    try:
+        if not firebase_admin._apps:
+            cred = credentials.Certificate("/etc/secrets/firebase.json")
+            db_url = os.getenv("FIREBASE_DATABASE_URL")
+            firebase_admin.initialize_app(cred, {"databaseURL": db_url})
+            logger.info("Firebase Realtime Database เชื่อมต่อสำเร็จ")
+    except Exception as e:
+        logger.error(f"Firebase Init Error: {e}")
+
+init_firebase()
 
 
 class InnovestXTradingBot:
@@ -64,7 +85,10 @@ class InnovestXTradingBot:
         self.target_currency = target_currency
         self.host = "api.innovestxonline.com"
         self.base_url = f"https://{self.host}"
-        self.state_file = "bot_state.json"
+        # path ที่เก็บ state บน Firebase Realtime Database — แยกตาม symbol กันชนกันถ้า
+        # รันบอทหลายตัว/หลายเหรียญพร้อมกันในอนาคต (เดิมใช้ไฟล์ bot_state.json บนดิสก์
+        # ซึ่งหายทุกครั้งที่ Render restart — ดูคอมเมนต์ init_firebase() ด้านบน)
+        self.state_path = f"bots/{symbol}/state"
 
         self.trailing_stop_percent = trailing_stop_percent
         self.stop_loss_percent = stop_loss_percent
@@ -90,22 +114,22 @@ class InnovestXTradingBot:
             "daily_realized_pnl": 0.0,
             "consecutive_losses": 0,
         }
-        if os.path.exists(self.state_file):
-            try:
-                with open(self.state_file, "r", encoding="utf-8") as f:
-                    saved = json.load(f)
-                    default_state.update(saved)
-                    logger.info(f"โหลดสถานะบอทสำเร็จ: status={default_state['status']}")
-            except Exception as e:
-                logger.warning(f"ไม่สามารถอ่านไฟล์สถานะได้ กำลังใช้ค่าเริ่มต้น: {e}")
+        try:
+            saved = db.reference(self.state_path).get()
+            if saved:
+                default_state.update(saved)
+                logger.info(f"โหลดสถานะบอทจาก Firebase สำเร็จ: status={default_state['status']}")
+            else:
+                logger.info("ยังไม่มีสถานะเดิมบน Firebase (path ว่าง) — เริ่มจากค่าเริ่มต้น")
+        except Exception as e:
+            logger.warning(f"อ่านสถานะจาก Firebase ไม่ได้ กำลังใช้ค่าเริ่มต้น: {e}")
         return default_state
 
     def save_state(self):
         try:
-            with open(self.state_file, "w", encoding="utf-8") as f:
-                json.dump(self.state, f, indent=4, ensure_ascii=False)
+            db.reference(self.state_path).set(self.state)
         except Exception as e:
-            logger.error(f"บันทึกไฟล์สถานะไม่สำเร็จ: {e}")
+            logger.error(f"บันทึกสถานะไป Firebase ไม่สำเร็จ: {e}")
 
     def _handle_shutdown(self, signum, frame):
         logger.info(f"ได้รับสัญญาณหยุด ({signum}) กำลังบันทึกสถานะก่อนปิดบอท...")
@@ -415,7 +439,8 @@ class InnovestXTradingBot:
         if halt_reason:
             self.state["status"] = "HALTED"
             logger.error(f"🛑 CIRCUIT BREAKER ทำงาน: {halt_reason} — บอทหยุดเทรด "
-                         f"(ปลดล็อกอัตโนมัติวันถัดไป หรือแก้ status ใน {self.state_file} ด้วยมือ)")
+                         f"(ปลดล็อกอัตโนมัติวันถัดไป หรือแก้ status บน Firebase ที่ path "
+                         f"'{self.state_path}' ด้วยมือ)")
         self.save_state()
 
     # ==================== Strategy ====================
