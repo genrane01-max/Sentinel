@@ -110,6 +110,28 @@ class InnovestXTradingBot:
         logger.info(f"ได้รับสัญญาณหยุด ({signum}) กำลังบันทึกสถานะก่อนปิดบอท...")
         self._stop_requested = True
         self.save_state()
+        
+        def reconcile_state_on_startup(self):
+        """เช็คว่า state ใน state file ตรงกับยอดจริงในพอร์ตหรือไม่ ก่อนเริ่ม loop"""
+        logger.info("กำลังตรวจสอบสถานะกับยอดจริงในพอร์ต (Reconcile)...")
+        _, coin_free, _ = self.get_free_balance()
+        rules = self.get_symbol_rules()
+        dust_threshold = float(rules["quantity_increment"])
+
+        if self.state["status"] == "HOLDING" and coin_free <= dust_threshold:
+            logger.error(f"⚠️ RECONCILE MISMATCH: state บอก HOLDING แต่ในพอร์ตมีแค่ {coin_free} "
+                         f"(อาจขายไปแล้วตอนบอทออฟไลน์) รีเซ็ตเป็น IDLE เพื่อความปลอดภัย")
+            self.state.update({"status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
+            self.save_state()
+        elif self.state["status"] == "IDLE" and coin_free > dust_threshold:
+            logger.error(f"⚠️ RECONCILE MISMATCH: state บอก IDLE แต่มีเหรียญค้างอยู่ {coin_free} "
+                         f"(ไม่รู้ต้นทุนจริง) บอทจะไม่เทรดอัตโนมัติจนกว่าจะตรวจสอบด้วยมือ")
+            self.state["status"] = "HALTED"
+            self.save_state()
+        else:
+            logger.info(f"Reconcile ผ่าน: state={self.state['status']} ตรงกับพอร์ตจริง ({coin_free} {self.target_currency})")
+
+    </parameter>
 
     # ==================== HTTP / signing ====================
 
