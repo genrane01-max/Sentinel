@@ -1081,7 +1081,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()[span_10](start_span)[span_10](end_span)
             self.wfile.write(html.encode("utf-8"))[span_11](start_span)[span_11](end_span)
         except Exception as e:
-            logger.error(f"Dashboard render error: {e}")[span_12](start_span)[span_12](end_span)
+            logger.error(f"Dashboard render error: {e}")
             self.send_response(200)[span_13](start_span)[span_13](end_span)
             self.send_header("Content-Type", "text/plain; charset=utf-8")[span_14](start_span)[span_14](end_span)
             self.end_headers()[span_15](start_span)[span_15](end_span)
