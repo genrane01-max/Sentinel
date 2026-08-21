@@ -513,15 +513,26 @@ class InnovestXTradingBot:
         today = self._today_str()
         if self.state.get("trade_date") != today:
             thb_free, _, _ = self.get_free_balance()
+            
+            # คำนวณมูลค่าพอร์ตรวม (Total Equity) ณ เที่ยงคืนเพื่อใช้เป็นฐานคำนวณ % ขาดทุนที่แท้จริง
+            total_equity = thb_free
+            if self.state["status"] == "HOLDING" and self.state["quantity"] > 0:
+                latest_price = self.get_latest_price()
+                if latest_price:
+                    total_equity += (self.state["quantity"] * latest_price)
+                else:
+                    total_equity += (self.state["quantity"] * self.state["entry_price"])
+                    
             self.state["trade_date"] = today
-            self.state["daily_start_balance"] = thb_free
+            self.state["daily_start_balance"] = total_equity  # ใช้ยอดพอร์ตรวมเป็นฐานคำนวณแทนเงินสดว่าง
             self.state["daily_realized_pnl"] = 0.0
             self.state["consecutive_losses"] = 0
+            
             if self.state["status"] == "HALTED":
                 logger.info("วันใหม่: ปลดล็อก Circuit Breaker อัตโนมัติ กลับสู่สถานะ IDLE")
                 self.state["status"] = "IDLE"
             self.save_state()
-            logger.info(f"เริ่มวันใหม่ ({today}) ทุนตั้งต้น: {thb_free:.2f} THB")
+            logger.info(f"เริ่มวันใหม่ ({today}) มูลค่าพอร์ตรวมตั้งต้น: {total_equity:.2f} THB")
 
     def _register_trade_result(self, pnl_thb):
         self.state["daily_realized_pnl"] += pnl_thb
