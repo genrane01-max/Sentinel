@@ -1133,13 +1133,13 @@ def render_dashboard(running_symbol, state, control):
 
     unlock_button_html = ""
     if status == "HALTED":
-        unlock_button_html = f'''<form class="control-row" method="POST" action="/control/unlock">
-      <div class="control-info">
-        <div class="control-label">บอทถูกล็อกอยู่ (HALTED)</div>
+        unlock_button_html = f'''<form class="control-card halted" method="POST" action="/control/unlock">
+      <div class="control-label">บอทถูกล็อกอยู่ (HALTED)</div>
         <div class="control-sub">{reason}</div>
-      </div>
+        <div class="field-row">
       {password_field_html}
       <button type="submit" class="btn btn-danger">🔓 ปลดล็อกตอนนี้</button>
+      </div>
     </form>'''
 
     return DASHBOARD_TEMPLATE.safe_substitute(
