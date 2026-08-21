@@ -503,10 +503,10 @@ class InnovestXTradingBot:
 
             if current_price <= stop_loss_threshold:
                 logger.warning("🚨 ถึงจุด Hard Stop Loss ขายทันทีเพื่อจำกัดความเสียหาย")
-                self.sell_position(qty)
+                self.sell_position(qty, current_price)
             elif current_price <= trailing_threshold and current_price > breakeven_price:
                 logger.info(f"💰 ถึงจุด Trailing Stop และยังคุ้มค่าธรรมเนียม (breakeven {breakeven_price:.2f}) ขายล็อกกำไร")
-                self.sell_position(qty)
+                self.sell_position(qty, current_price)
             elif current_price <= trailing_threshold:
                 logger.info(f"⏸ ราคาย่อถึง trailing threshold แต่ยังไม่คุ้มค่าธรรมเนียม "
                             f"(breakeven {breakeven_price:.2f}) ถือต่อ")
