@@ -274,19 +274,24 @@ class InnovestXTradingBot:
 
     # ==================== Market data / price history ====================
     def get_latest_price(self):
-        path = "/api/v1/digital-asset/ticker/subscribe"
-        body = {"symbol": self.symbol}
+        """ดึงราคาจับคู่ซื้อขายล่าสุดจริง (Last Trade Price) แบบเรียลไทม์จาก Level 2 Order Book"""
+        path = "/api/v1/digital-asset/orderbook/lvl2"
+        # ส่ง depth: 1 เพื่อดึงแถวแรกแถวเดียว ข้อมูลจะได้โหลดเร็วที่สุด
+        body = {
+            "symbol": self.symbol,
+            "depth": 1
+        }
         res = self.send_request("POST", path, body=body)
         if res and res.get("code") == "0000":
             data = res.get("data")
             if isinstance(data, list) and data:
-                data = data[0]
-            if isinstance(data, dict) and "close" in data:
-                try:
-                    return float(data["close"])
-                except (TypeError, ValueError):
-                    pass
-        logger.warning("ดึงราคาปัจจุบันล้มเหลว")
+                first_record = data
+                if isinstance(first_record, dict) and "lastTradePrice" in first_record:
+                    try:
+                        return float(first_record["lastTradePrice"])
+                    except (TypeError, ValueError):
+                        pass
+        logger.warning("ดึงราคาล่าสุดเรียลไทม์ (lastTradePrice) ล้มเหลว")
         return None
 
     def _record_price_tick(self, price):
