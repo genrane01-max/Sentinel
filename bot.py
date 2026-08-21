@@ -131,8 +131,6 @@ class InnovestXTradingBot:
         else:
             logger.info(f"Reconcile ผ่าน: state={self.state['status']} ตรงกับพอร์ตจริง ({coin_free} {self.target_currency})")
 
-    </parameter>
-
     # ==================== HTTP / signing ====================
 
     def send_request(self, method, path, query="", body=None, _retry_count=0):
