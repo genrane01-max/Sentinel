@@ -532,6 +532,8 @@ class InnovestXTradingBot:
 
         order_id = order_res["data"]["orderId"]
         sell_avg_price = self.confirm_fill_price(order_id)
+        if sell_avg_price > 0 and current_price is not None:
+            self._check_slippage(current_price, sell_avg_price, "ขาย")
         entry_price = self.state["entry_price"]
         pnl_thb = (sell_avg_price - entry_price) * sell_qty if sell_avg_price > 0 else 0.0
         if sell_avg_price == 0.0:
