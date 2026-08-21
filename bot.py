@@ -126,6 +126,7 @@ class InnovestXTradingBot:
     REQUEST_TIMEOUT_SEC = 10
     MAX_RETRIES = 3
     FEE_ESTIMATE_PATH = "/api/v1/digital-asset/order/fee/inquiry"
+    RECONCILE_INTERVAL_SEC = 300  # เช็ค state กับพอร์ตจริงซ้ำทุกกี่วิระหว่างบอทรันอยู่ (นอกเหนือจากตอน startup) — กันเคสขายเหรียญนอกบอทระหว่างที่บอทยังรันค้างอยู่
 
     def __init__(self, api_key, api_secret, symbol="BTCTHB", base_currency="THB",
                  target_currency=None, trailing_stop_percent=2.0, stop_loss_percent=3):
@@ -154,6 +155,8 @@ class InnovestXTradingBot:
         self._stop_requested = False
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
+
+        self._last_reconcile_ts = 0.0  # บังคับให้ reconcile รอบแรกใน loop ทำงานตามปกติ (ไม่ต้องรอครบ RECONCILE_INTERVAL_SEC)
 
         self.state = self.load_state()
 
@@ -194,15 +197,22 @@ class InnovestXTradingBot:
         self.save_state()
 
     def reconcile_state_on_startup(self):
-        """เช็คว่า state ตรงกับยอดจริงในพอร์ตหรือไม่ ก่อนเริ่ม loop"""
+        """เช็คว่า state ตรงกับยอดจริงในพอร์ตหรือไม่ — เรียกตอน start และเรียกซ้ำเป็นระยะระหว่างบอทรันผ่าน maybe_reconcile_periodically()"""
         logger.info(f"[{self.symbol}] กำลังตรวจสอบสถานะกับยอดจริงในพอร์ต (Reconcile)...")
-        _, coin_free, _ = self.get_free_balance()
+        _, coin_free, has_pending = self.get_free_balance()
+
+        if has_pending:
+            # มีออเดอร์ค้างอยู่ในระบบ (เช่น เพิ่งส่งคำสั่งซื้อ/ขายไปแต่ยังไม่ fill) — ยอดพอร์ตช่วงนี้ไม่นิ่ง
+            # ข้าม reconcile รอบนี้ไปก่อน ไม่อัปเดต _last_reconcile_ts เพื่อให้เช็คใหม่ในรอบ loop ถัดไปทันที
+            logger.info("Reconcile: มีออเดอร์ค้างอยู่ในระบบ ข้ามการเช็ครอบนี้ (จะลองใหม่รอบถัดไป)")
+            return
+
         rules = self.get_symbol_rules()
         dust_threshold = float(rules["quantity_increment"])
 
         if self.state["status"] == "HOLDING" and coin_free <= dust_threshold:
             logger.error(f"⚠️ RECONCILE MISMATCH: state บอก HOLDING แต่ในพอร์ตมีแค่ {coin_free} "
-                         f"(อาจขายไปแล้วตอนบอทออฟไลน์) รีเซ็ตเป็น IDLE เพื่อความปลอดภัย")
+                         f"(อาจขายไปแล้วตอนบอทออฟไลน์ หรือขายมือระหว่างบอทรันอยู่) รีเซ็ตเป็น IDLE เพื่อความปลอดภัย")
             self.state.update({"status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
             self.save_state()
         elif self.state["status"] == "IDLE" and coin_free > dust_threshold:
@@ -213,6 +223,15 @@ class InnovestXTradingBot:
         else:
             logger.info(f"Reconcile ผ่าน: state={self.state['status']} ตรงกับพอร์ตจริง "
                         f"({coin_free} {self.target_currency})")
+
+        self._last_reconcile_ts = time.time()
+
+    def maybe_reconcile_periodically(self):
+        """เรียก reconcile ซ้ำเป็นระยะทุก RECONCILE_INTERVAL_SEC ระหว่างบอทรันอยู่ (ไม่ใช่แค่ตอน start)
+        กันเคสที่มีการขาย/โอนเหรียญออกนอกบอทระหว่างที่บอทยังรันค้างอยู่ในหน่วยความจำ — ปกติ reconcile_state_on_startup()
+        รันแค่ตอนเริ่มโปรเซสเท่านั้น ถ้าไม่เรียกซ้ำ บอทจะไม่มีทางรู้ตัวจนกว่าจะ restart"""
+        if time.time() - self._last_reconcile_ts >= self.RECONCILE_INTERVAL_SEC:
+            self.reconcile_state_on_startup()
 
     # ==================== HTTP / signing ====================
     def send_request(self, method, path, query="", body=None, _retry_count=0):
@@ -705,6 +724,7 @@ class InnovestXTradingBot:
     # ==================== Main loop ====================
     def run_once(self):
         """รันหนึ่งรอบของ loop หลัก (ไม่ sleep) — เรียกจาก run() หรือจาก supervisor loop ใน __main__"""
+        self.maybe_reconcile_periodically()
         self._maybe_reset_daily_counters()
 
         if self.state["status"] == "HALTED":
