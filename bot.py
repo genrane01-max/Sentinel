@@ -539,6 +539,7 @@ class InnovestXTradingBot:
 
     def run(self, poll_interval_sec=60):
         logger.info(f"เริ่มบอทเทรด {self.symbol} (poll ทุก {poll_interval_sec} วิ) — กด Ctrl+C เพื่อหยุดอย่างปลอดภัย")
+        self.reconcile_state_on_startup()
         while not self._stop_requested:
             try:
                 self._maybe_reset_daily_counters()
