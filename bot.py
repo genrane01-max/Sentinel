@@ -731,6 +731,7 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
       <div class="hero-label">ราคาปัจจุบัน (${symbol_display})</div>
       <div class="hero-price">${hero_price}</div>
       ${hero_delta_html}
+      ${freshness_html}
     </section>
 
     ${banners_html}
@@ -811,7 +812,10 @@ def render_dashboard(running_symbol, state, control):
     price_history = state.get("price_history", []) or []
 
     current_price = price_history[-1][1] if price_history else None
+    last_price_ts = price_history[-1][0] if price_history else None
     now = time.time()
+    price_age_sec = (now - last_price_ts) if last_price_ts is not None else None
+    PRICE_STALE_THRESHOLD_SEC = 150  # เกิน ~2.5 เท่าของ poll interval (60วิ) ถือว่าเก่าเกินไป น่าสงสัย
 
     # ---- status pill ----
     status_map = {
@@ -827,6 +831,17 @@ def render_dashboard(running_symbol, state, control):
     else:
         hero_price = "฿—"
 
+    # ---- ความสดของราคา (แยกจากเวลา render หน้า) ----
+    freshness_html = ""
+    if price_age_sec is not None:
+        age_min = int(price_age_sec // 60)
+        age_sec = int(price_age_sec % 60)
+        age_text = f"{age_min} นาที {age_sec} วิ" if age_min > 0 else f"{age_sec} วิ"
+        if price_age_sec > PRICE_STALE_THRESHOLD_SEC:
+            freshness_html = f'<div class="hero-delta negative">⚠️ ราคาอาจไม่สด — ดึงมาเมื่อ {age_text} ที่แล้ว</div>'
+        else:
+            freshness_html = f'<div class="hero-sub">อัปเดตราคาเมื่อ {age_text} ที่แล้ว</div>'
+
     hero_delta_html = ""
     if status == "HOLDING" and entry_price > 0 and current_price is not None:
         delta_pct = (current_price - entry_price) / entry_price * 100
@@ -838,6 +853,10 @@ def render_dashboard(running_symbol, state, control):
 
     # ---- banners ----
     banners = []
+    if price_age_sec is not None and price_age_sec > PRICE_STALE_THRESHOLD_SEC:
+        age_min = int(price_age_sec // 60)
+        banners.append(f'<div class="banner banner-danger">⚠️ ราคาที่แสดงอาจไม่ใช่ราคาสด (เก่าไปแล้ว {age_min}+ นาที) — ตรวจสอบ log บน Render ว่าดึงราคาล้มเหลวซ้ำๆ หรือไม่</div>')
+
     if status == "HALTED":
         active_threshold = control.get("max_daily_loss_percent", InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT)
         daily_loss_percent = -daily_pnl / daily_start * 100 if daily_start > 0 else 0.0
@@ -935,6 +954,7 @@ def render_dashboard(running_symbol, state, control):
         status_label=status_label,
         hero_price=hero_price,
         hero_delta_html=hero_delta_html,
+        freshness_html=freshness_html,
         banners_html=banners_html,
         progress_html=progress_html,
         cards_html=cards_html,
