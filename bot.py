@@ -467,6 +467,7 @@ class InnovestXTradingBot:
             if avg_price == 0.0:
                 avg_price = current_price
                 logger.warning("ยืนยันราคาจับคู่จริงไม่ได้ ใช้ราคาตลาด ณ ขณะนั้นแทน (ควรตรวจสอบ order ด้วยมือ)")
+                 self._check_slippage(current_price, avg_price, "ซื้อ")
 
             estimated_qty = self._floor_to_increment(buy_value / avg_price, rules["quantity_increment"])
             fee_pct = self.estimate_roundtrip_fee_percent()
