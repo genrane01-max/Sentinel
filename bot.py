@@ -721,11 +721,12 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased; min-height:100vh; display:flex; justify-content:center; padding:0 0 40px; }
   .app { width:100%; max-width:480px; }
-  .topbar { position:sticky; top:0; z-index:10; display:flex; align-items:center; justify-content:space-between; padding:18px 20px; background:rgba(240,238,230,0.92); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); }
+  /* โค้ดใหม่ (ธีมมืดมืดกลมกลืน) */
+  .topbar { position:sticky; top:0; z-index:10; display:flex; align-items:center; justify-content:space-between; padding:18px 20px; background:rgba(42,40,34,0.95); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); }
   .brand { display:flex; align-items:center; gap:10px; }
   .spark { width:22px; height:22px; flex-shrink:0; }
   .spark path { fill: var(--accent); }
-  .brand-title { font-size:15px; font-weight:700; letter-spacing:-0.01em; }
+  .brand-title { font-size:15px; font-weight:700; letter-spacing:-0.01em; color:var(--text); }
   .brand-sub { font-size:12px; color:var(--text-soft); margin-top:1px; }
   .status-pill { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border-radius:999px; font-size:12px; font-weight:600; letter-spacing:0.02em; }
   .status-holding { background:var(--green-soft); color:var(--green); }
