@@ -1059,10 +1059,10 @@ def render_dashboard(running_symbol, state, control):
 # ==================== Web Service (หน้าเว็บสถานะ + ควบคุมบอท สำหรับ Render) ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        pass  # กัน log ของ http.server เองไปปนกับ log ของบอท (คำขอ GET ทุกครั้งไม่จำเป็นต้องขึ้น log)[span_1](start_span)[span_1](end_span)
+        pass  # กัน log ของ http.server เองไปปนกับ log ของบอท (คำขอ GET ทุกครั้งไม่จำเป็นต้องขึ้น log)
 
     def do_GET(self):
-        # 1. เพิ่มส่วนนี้: ถ้า UptimeRobot ยิงมาที่ /health ให้ตอบ OK สั้นๆ กลับไปทันที[span_2](start_span)[span_2](end_span)
+        # 1. เพิ่มส่วนนี้: ถ้า UptimeRobot ยิงมาที่ /health ให้ตอบ OK สั้นๆ กลับไปทันที
         if self.path == "/health":
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -1070,22 +1070,22 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"OK")
             return
 
-        # 2. ส่วนเดิม: สำหรับการเข้าดูหน้า Dashboard ผ่านเบราว์เซอร์ปกติ[span_3](start_span)[span_3](end_span)
+        # 2. ส่วนเดิม: สำหรับการเข้าดูหน้า Dashboard ผ่านเบราว์เซอร์ปกติ
         try:
-            running_symbol = RUNNING_SYMBOL["value"] or DEFAULT_SYMBOL[span_4](start_span)[span_4](end_span)
-            state = db.reference(f"bots/{running_symbol}/state").get() or {}[span_5](start_span)[span_5](end_span)
-            control = load_control()[span_6](start_span)[span_6](end_span)
-            html = render_dashboard(running_symbol, state, control)[span_7](start_span)[span_7](end_span)
-            self.send_response(200)[span_8](start_span)[span_8](end_span)
-            self.send_header("Content-Type", "text/html; charset=utf-8")[span_9](start_span)[span_9](end_span)
-            self.end_headers()[span_10](start_span)[span_10](end_span)
-            self.wfile.write(html.encode("utf-8"))[span_11](start_span)[span_11](end_span)
+            running_symbol = RUNNING_SYMBOL["value"] or DEFAULT_SYMBOL
+            state = db.reference(f"bots/{running_symbol}/state").get() or {}
+            control = load_control()
+            html = render_dashboard(running_symbol, state, control)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html.encode("utf-8"))
         except Exception as e:
             logger.error(f"Dashboard render error: {e}")
-            self.send_response(200)[span_13](start_span)[span_13](end_span)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")[span_14](start_span)[span_14](end_span)
-            self.end_headers()[span_15](start_span)[span_15](end_span)
-            self.wfile.write("Bot is running! (dashboard error, see logs)".encode("utf-8"))[span_16](start_span)[span_16](end_span)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write("Bot is running! (dashboard error, see logs)".encode("utf-8"))
 
     def do_POST(self):
         try:
