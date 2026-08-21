@@ -1122,7 +1122,7 @@ if __name__ == "__main__":
             if bot.state.get("quantity", 0) <= 0:
                 logger.info(f"🔄 เปลี่ยนเหรียญเทรดจาก {current_symbol} เป็น {control['active_symbol']} (สั่งจากหน้าเว็บ)")
                 current_symbol = control["active_symbol"]
-                bot = InnovestXTradingBot(api_key=api_key, api_secret=api_secret, symbol=current_symbol)
+                bot = InnovestXTradingBot(api_key=api_key, api_secret=api_secret, symbol=current_symbol, stop_loss_percent=3.0)
                 bot.reconcile_state_on_startup()
                 RUNNING_SYMBOL["value"] = current_symbol
             else:
