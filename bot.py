@@ -752,16 +752,22 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
     --red: #E08277; --red-soft: #3A2523;
   }
   * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; -webkit-font-smoothing:antialiased; min-height:100vh; display:flex; justify-content:center; padding:0 0 40px; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased; min-height:100vh;
+    display:flex; justify-content:center; padding:0 0 40px; }
   .app { width:100%; max-width:480px; }
-  /* โค้ดใหม่ (ธีมมืดมืดกลมกลืน) */
-  .topbar { position:sticky; top:0; z-index:10; display:flex; align-items:center; justify-content:space-between; padding:18px 20px; background:rgba(42,40,34,0.95); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); }
+  
+  .topbar { position:sticky; top:0; z-index:10; display:flex; align-items:center;
+    justify-content:space-between; padding:18px 20px; background:rgba(42,40,34,0.95);
+    backdrop-filter:blur(8px); border-bottom:1px solid var(--border); }
   .brand { display:flex; align-items:center; gap:10px; }
   .spark { width:22px; height:22px; flex-shrink:0; }
   .spark path { fill: var(--accent); }
   .brand-title { font-size:15px; font-weight:700; letter-spacing:-0.01em; color:var(--text); }
   .brand-sub { font-size:12px; color:var(--text-soft); margin-top:1px; }
-  .status-pill { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border-radius:999px; font-size:12px; font-weight:600; letter-spacing:0.02em; }
+  .status-pill { display:inline-flex; align-items:center; gap:6px; padding:6px 12px;
+    border-radius:999px; font-size:12px; font-weight:600; letter-spacing:0.02em; }
   .status-holding { background:var(--green-soft); color:var(--green); }
   .status-idle { background:#33312A; color:var(--text-soft); }
   .status-halted { background:var(--red-soft); color:var(--red); }
@@ -769,48 +775,90 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .status-holding .dot { animation:pulse 1.8s ease-in-out infinite; }
   @keyframes pulse { 0%,100%{opacity:1;transform:scale(1);} 50%{opacity:.45;transform:scale(.8);} }
   @media (prefers-reduced-motion:reduce){ .status-holding .dot{animation:none;} }
+  
   .hero { padding:32px 24px 20px; text-align:center; }
   .hero-label { font-size:13px; color:var(--text-soft); font-weight:500; }
-  .hero-price { font-size:clamp(34px,9vw,44px); font-weight:800; letter-spacing:-0.02em; font-variant-numeric:tabular-nums; margin-top:4px; }
+  .hero-price { font-size:clamp(34px,9vw,44px); font-weight:800; letter-spacing:-0.02em;
+    font-variant-numeric:tabular-nums; margin-top:4px; }
   .hero-decimal { font-size:.55em; color:var(--text-soft); font-weight:700; }
-  .hero-delta { display:inline-block; margin-top:10px; font-size:13px; font-weight:600; padding:4px 10px; border-radius:999px; }
+  .hero-delta { display:inline-block; margin-top:10px; font-size:13px; font-weight:600;
+    padding:4px 10px; border-radius:999px; }
   .hero-delta.positive { color:var(--green); background:var(--green-soft); }
   .hero-delta.negative { color:var(--red); background:var(--red-soft); }
   .hero-sub { margin-top:10px; font-size:13px; color:var(--text-soft); }
-  .banner { margin:0 20px 12px; padding:12px 14px; border-radius:12px; font-size:13px; font-weight:600; line-height:1.5; }
+  
+  .banner { margin:0 20px 12px; padding:12px 14px; border-radius:12px; font-size:13px;
+    font-weight:600; line-height:1.5; }
   .banner-danger { background:var(--red-soft); color:var(--red); }
   .banner-info { background:var(--accent-soft); color:var(--accent); }
   .banner-warning { background:#3D3420; color:#E8C468; }
-  .progress-card { margin:0 20px 16px; background:var(--card); border:1px solid var(--border); border-radius:16px; padding:14px 16px; }
+  
+  .progress-card { margin:0 20px 16px; background:var(--card); border:1px solid var(--border);
+    border-radius:16px; padding:14px 16px; }
   .progress-label { font-size:12px; color:var(--text-soft); font-weight:600; }
   .progress-bar { margin-top:8px; height:8px; border-radius:999px; background:#33312A; overflow:hidden; }
   .progress-fill { height:100%; background:var(--accent); border-radius:999px; transition:width .3s ease; }
   .progress-sub { margin-top:6px; font-size:12px; color:var(--text-soft); }
+  
   .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:0 20px; }
-  .card { background:var(--card); border:1px solid var(--border); border-radius:16px; padding:14px 16px; box-shadow:0 1px 2px rgba(43,40,34,.03); }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:16px;
+    padding:14px 16px; box-shadow:0 1px 2px rgba(43,40,34,.03); }
   .card-label { font-size:12px; color:var(--text-soft); font-weight:500; }
-  .card-value { font-size:17px; font-weight:700; margin-top:4px; font-variant-numeric:tabular-nums; letter-spacing:-0.01em; }
+  .card-value { font-size:17px; font-weight:700; margin-top:4px; font-variant-numeric:tabular-nums;
+    letter-spacing:-0.01em; }
   .card-value.positive { color:var(--green); }
   .card-value.negative { color:var(--red); }
   .card-value.accent { color:var(--accent); }
   .card-sub { font-size:11px; color:var(--text-soft); margin-top:2px; }
-  .control { margin:20px 20px 0; background:var(--card); border:1px solid var(--border); border-radius:16px; padding:16px; }
-  .control-title { font-size:13px; font-weight:700; margin-bottom:12px; }
-  .control-row { display:flex; align-items:flex-end; gap:10px; margin-bottom:14px; }
-  .control-row:last-child { margin-bottom:0; }
-  .control-info { flex:1; min-width:0; }
-  .control-label { font-size:12px; font-weight:600; color:var(--text); }
-  .control-sub { font-size:11px; color:var(--text-soft); margin-top:2px; }
-  .symbol-input { width:100%; margin-top:8px; padding:9px 10px; border:1px solid var(--border); border-radius:10px; font-size:14px; font-weight:600; letter-spacing:.02em; text-transform:uppercase; background:var(--bg); color:var(--text); }
-  .symbol-input:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  
+  /* ===== ส่วนควบคุมบอท (จุดที่แก้ใหม่ทั้งหมด) ===== */
+  .control { margin:28px 20px 0; }
+  .control-heading { display:flex; align-items:baseline; justify-content:space-between;
+    margin-bottom:14px; padding:0 2px; }
+  .control-title { font-size:15px; font-weight:700; }
+  .control-heading-sub { font-size:12px; color:var(--text-soft); }
+  
+  .control-card { background:var(--card); border:1px solid var(--border); border-radius:16px;
+    padding:16px; margin-bottom:12px; }
+  .control-card:last-child { margin-bottom:0; }
+  .control-card.halted { border-color:var(--red);
+    background:linear-gradient(180deg, var(--red-soft), var(--card) 60%); }
+  
+  .toggle-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  
+  .control-icon { display:inline-flex; width:26px; height:26px; align-items:center;
+    justify-content:center; border-radius:8px; background:var(--accent-soft);
+    color:var(--accent); font-size:13px; margin-right:8px; flex-shrink:0; }
+  .label-row { display:flex; align-items:center; }
+  .control-label { font-size:13px; font-weight:600; color:var(--text); }
+  .control-sub { font-size:12px; color:var(--text-soft); margin-top:5px; line-height:1.5; }
+  
+  .symbol-input { width:100%; margin-top:10px; padding:10px 12px; border:1px solid var(--border);
+    border-radius:10px; font-size:14px; font-weight:600; letter-spacing:.02em;
+    text-transform:uppercase; background:var(--bg); color:var(--text); }
+  .symbol-input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+  
   .quick-picks { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
-  .pick { font-size:11px; font-weight:600; color:var(--text-soft); background:var(--bg); border:1px solid var(--border); border-radius:999px; padding:4px 9px; cursor:pointer; }
-  .password-input { width:100%; margin-top:8px; padding:9px 10px; border:1px solid var(--border); border-radius:10px; font-size:13px; background:var(--bg); color:var(--text); }
-  .btn { border:none; border-radius:10px; padding:10px 16px; font-size:13px; font-weight:700; cursor:pointer; white-space:nowrap; }
+  .pick { font-size:11px; font-weight:600; color:var(--text-soft); background:var(--bg);
+    border:1px solid var(--border); border-radius:999px; padding:4px 9px; cursor:pointer; }
+  .pick:hover { border-color:var(--accent); color:var(--accent); }
+  
+  .field-row { display:flex; align-items:center; gap:8px; margin-top:12px; }
+  .password-input { flex:1; min-width:0; padding:10px 12px; border:1px solid var(--border);
+    border-radius:10px; font-size:13px; background:var(--bg); color:var(--text); }
+  .password-input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+  
+  .btn { border:none; border-radius:10px; padding:10px 16px; font-size:13px; font-weight:700;
+    cursor:pointer; white-space:nowrap; flex-shrink:0; transition:filter .15s ease; }
+  .btn:hover { filter:brightness(1.08); }
+  .btn:active { filter:brightness(0.92); }
   .btn-accent { background:var(--accent); color:#fff; }
   .btn-neutral { background:#33312A; color:var(--text); }
   .btn-danger { background:var(--red); color:#fff; }
-  footer { display:flex; align-items:center; justify-content:center; gap:8px; margin-top:20px; font-size:12px; color:var(--text-soft); }
+  .btn-sm { padding:8px 14px; font-size:12px; }
+  
+  footer { display:flex; align-items:center; justify-content:center; gap:8px; margin-top:20px;
+    font-size:12px; color:var(--text-soft); }
   .sep { opacity:.5; }
   .refresh-link { color:var(--accent); text-decoration:none; font-weight:600; }
 </style>
@@ -838,59 +886,87 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
     <div class="grid">
       ${cards_html}
     </div>
-    <section class="control">
-      <div class="control-title">ควบคุมบอท</div>
-      ${unlock_button_html}
-      <form class="control-row" method="POST" action="/control/pause">
-        <div class="control-info">
-          <div class="control-label">การเทรดอัตโนมัติ</div>
-          <div class="control-sub">${pause_sub}</div>
-        </div>
-        <button type="submit" class="btn ${pause_btn_class}">${pause_btn_label}</button>
-      </form>
-      <form class="control-row" method="POST" action="/control/symbol" style="flex-direction:column; align-items:stretch;">
-        <div class="control-info">
-          <div class="control-label">เหรียญที่เทรด (กำลังรัน: ${running_symbol})</div>
-          <input class="symbol-input" type="text" name="symbol" value="${symbol_input_value}" autocapitalize="characters" autocomplete="off">
-          <div class="quick-picks">
-            <span class="pick" onclick="document.querySelector('.symbol-input').value='BTCTHB'">BTCTHB</span>
-            <span class="pick" onclick="document.querySelector('.symbol-input').value='ETHTHB'">ETHTHB</span>
-            <span class="pick" onclick="document.querySelector('.symbol-input').value='XRPTHB'">XRPTHB</span>
-            <span class="pick" onclick="document.querySelector('.symbol-input').value='USDTTHB'">USDTTHB</span>
-          </div>
-          <div class="control-sub" style="margin-top:6px;">พิมพ์คู่เหรียญตามที่ InnovestX รองรับ (ตัวพิมพ์ใหญ่) เปลี่ยนได้จริงเมื่อบอทไม่ได้ถือโพซิชันอยู่เท่านั้น</div>
-        </div>
-        ${password_field_html}
-        <button type="submit" class="btn btn-accent" style="margin-top:10px;">เปลี่ยนเหรียญ</button>
-      </form>
-      <form class="control-row" method="POST" action="/control/trade_size" style="flex-direction:column; align-items:stretch;">
-        <div class="control-info">
-          <div class="control-label">อัตราเงินที่ใช้เข้าซื้อต่อไม้ (กำลังตั้ง: ${trade_size_percent}% ของเงินว่าง)</div>
-          <input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="100" name="trade_size_percent" value="${trade_size_percent}">
-          <div class="control-sub" style="margin-top:6px;">เช่น ตั้ง 50 = ใช้เงินบาทว่างครึ่งหนึ่งเข้าซื้อทุกครั้งที่มีสัญญาณ ที่เหลือจะไม่ถูกแตะ</div>
-        </div>
-        ${password_field_html}
-        <button type="submit" class="btn btn-accent" style="margin-top:10px;">บันทึกค่า</button>
-      </form>
-      <form class="control-row" method="POST" action="/control/max_losses" style="flex-direction:column; align-items:stretch;">
-        <div class="control-info">
-          <div class="control-label">ขาดทุนติดกันกี่ไม้ถึงหยุด (กำลังตั้ง: ${max_consecutive_losses} ไม้)</div>
-          <input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="20" name="max_consecutive_losses" value="${max_consecutive_losses}">
-          <div class="control-sub" style="margin-top:6px;">ถ้าขาดทุนติดต่อกันครบจำนวนนี้ บอทจะหยุดเทรด (HALTED) ทันที</div>
-        </div>
-        ${password_field_html}
-        <button type="submit" class="btn btn-accent" style="margin-top:10px;">บันทึกค่า</button>
-      </form>
-      <form class="control-row" method="POST" action="/control/risk" style="flex-direction:column; align-items:stretch;">
-        <div class="control-info">
-          <div class="control-label">ขาดทุนสูงสุดที่ยอมรับต่อวัน (กำลังตั้ง: ${max_daily_loss_percent}%)</div>
-          <input class="symbol-input" style="text-transform:none;" type="number" step="0.1" min="0.1" max="100" name="max_daily_loss_percent" value="${max_daily_loss_percent}">
-          <div class="control-sub" style="margin-top:6px;">ถ้าขาดทุนสะสมวันนี้ถึง % นี้ บอทจะหยุดเทรดอัตโนมัติ (HALTED) จนกว่าจะข้ามวันใหม่ หรือปลดล็อกเอง</div>
-        </div>
-        ${password_field_html}
-        <button type="submit" class="btn btn-accent" style="margin-top:10px;">บันทึกค่า</button>
-      </form>
-    </section>
+<section class="control">
+
+<div class="control-heading">
+<div class="control-title">ควบคุมบอท</div>
+<div class="control-heading-sub">บันทึกแล้วมีผลทันที</div>
+</div>
+
+${unlock_button_html}
+
+<form class="control-card" method="POST" action="/control/pause">
+<div class="toggle-row">
+<div>
+<div class="control-label">การเทรดอัตโนมัติ</div>
+<div class="control-sub">${pause_sub}</div>
+</div>
+<button type="submit" class="btn ${pause_btn_class} btn-sm">${pause_btn_label}</button>
+</div>
+</form>
+
+<form class="control-card" method="POST" action="/control/symbol">
+<div class="label-row"><span class="control-icon">💱</span>
+<div class="control-label">เหรียญที่เทรด (กำลังรัน: ${running_symbol})</div>
+</div>
+<input class="symbol-input" type="text" name="symbol" value="${symbol_input_value}"
+autocapitalize="characters" autocomplete="off">
+<div class="quick-picks">
+<span class="pick" onclick="document.querySelector('.symbol-input').value='BTCTHB'">BTCTHB</span>
+<span class="pick" onclick="document.querySelector('.symbol-input').value='ETHTHB'">ETHTHB</span>
+<span class="pick" onclick="document.querySelector('.symbol-input').value='XRPTHB'">XRPTHB</span>
+<span class="pick" onclick="document.querySelector('.symbol-input').value='USDTTHB'">USDTTHB</span>
+</div>
+<div class="control-sub">พิมพ์คู่เหรียญตามที่ InnovestX รองรับ (ตัวพิมพ์ใหญ่)
+เปลี่ยนได้จริงเมื่อบอทไม่ได้ถือโพซิชันอยู่เท่านั้น</div>
+<div class="field-row">
+${password_field_html}
+<button type="submit" class="btn btn-accent">เปลี่ยนเหรียญ</button>
+</div>
+</form>
+
+<form class="control-card" method="POST" action="/control/trade_size">
+<div class="label-row"><span class="control-icon">💰</span>
+<div class="control-label">อัตราเงินที่ใช้เข้าซื้อต่อไม้ (กำลังตั้ง: ${trade_size_percent}% ของเงินว่าง)</div>
+</div>
+<input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="100"
+name="trade_size_percent" value="${trade_size_percent}">
+<div class="control-sub">เช่น ตั้ง 50 = ใช้เงินบาทว่างครึ่งหนึ่งเข้าซื้อทุกครั้งที่มีสัญญาณ
+ที่เหลือจะไม่ถูกแตะ</div>
+<div class="field-row">
+${password_field_html}
+<button type="submit" class="btn btn-accent">บันทึกค่า</button>
+</div>
+</form>
+
+<form class="control-card" method="POST" action="/control/max_losses">
+<div class="label-row"><span class="control-icon">🛑</span>
+<div class="control-label">ขาดทุนติดกันกี่ไม้ถึงหยุด (กำลังตั้ง: ${max_consecutive_losses} ไม้)</div>
+</div>
+<input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="20"
+name="max_consecutive_losses" value="${max_consecutive_losses}">
+<div class="control-sub">ถ้าขาดทุนติดต่อกันครบจำนวนนี้ บอทจะหยุดเทรด (HALTED) ทันที</div>
+<div class="field-row">
+${password_field_html}
+<button type="submit" class="btn btn-accent">บันทึกค่า</button>
+</div>
+</form>
+
+<form class="control-card" method="POST" action="/control/risk">
+<div class="label-row"><span class="control-icon">⚠️</span>
+<div class="control-label">ขาดทุนสูงสุดที่ยอมรับต่อวัน (กำลังตั้ง: ${max_daily_loss_percent}%)</div>
+</div>
+<input class="symbol-input" style="text-transform:none;" type="number" step="0.1" min="0.1" max="100"
+name="max_daily_loss_percent" value="${max_daily_loss_percent}">
+<div class="control-sub">ถ้าขาดทุนสะสมวันนี้ถึง % นี้ บอทจะหยุดเทรดอัตโนมัติ (HALTED)
+จนกว่าจะข้ามวันใหม่ หรือปลดล็อกเอง</div>
+<div class="field-row">
+${password_field_html}
+<button type="submit" class="btn btn-accent">บันทึกค่า</button>
+</div>
+</form>
+
+</section>
     <footer>
       <span>อัปเดตล่าสุด ${last_updated}</span>
       <span class="sep">·</span>
