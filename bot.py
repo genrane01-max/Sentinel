@@ -619,8 +619,12 @@ class InnovestXTradingBot:
 
             self._check_slippage(current_price, avg_price, "ซื้อ")
 
-            estimated_qty = self._floor_to_increment(buy_value / avg_price, rules["quantity_increment"])
+            # --- [จุดที่แก้ไข] คำนวณหักค่าธรรมเนียมขาซื้อออกก่อนบันทึกจำนวนเหรียญจริง ---
             fee_pct = self.estimate_roundtrip_fee_percent()
+            one_way_fee_factor = (fee_pct / 2) / 100  # หักเฉพาะค่าธรรมเนียมขาซื้อ (ครึ่งหนึ่งของ Roundtrip)
+
+            raw_qty = (buy_value / avg_price) * (1 - one_way_fee_factor)
+            estimated_qty = self._floor_to_increment(raw_qty, rules["quantity_increment"])
 
             self.state.update({
                 "status": "HOLDING",
