@@ -806,10 +806,69 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .quick-picks { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
   .pick { font-size:11px; font-weight:600; color:var(--text-soft); background:var(--bg); border:1px solid var(--border); border-radius:999px; padding:4px 9px; cursor:pointer; }
   .password-input { width:100%; margin-top:8px; padding:9px 10px; border:1px solid var(--border); border-radius:10px; font-size:13px; background:var(--bg); color:var(--text); }
-  .btn { border:none; border-radius:10px; padding:10px 16px; font-size:13px; font-weight:700; cursor:pointer; white-space:nowrap; }
-  .btn-accent { background:var(--accent); color:#fff; }
-  .btn-neutral { background:#33312A; color:var(--text); }
-  .btn-danger { background:var(--red); color:#fff; }
+  /* ==================== Modern Button Redesign ==================== */
+  .btn {
+    width: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 11px 18px;
+    font-size: 13.5px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    border: 1px solid transparent;
+    border-radius: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    box-sizing: border-box;
+    user-select: none;
+    text-decoration: none;
+  }
+  
+  .btn:hover {
+    transform: translateY(-1.5px);
+    filter: brightness(1.06);
+  }
+  
+  .btn:active {
+    transform: translateY(0.5px) scale(0.985);
+    filter: brightness(0.92);
+  }
+  
+  .btn-accent {
+    background: linear-gradient(135deg, #E08A65 0%, #C9704A 100%);
+    color: #FFFFFF;
+    box-shadow: 0 4px 14px rgba(224, 138, 101, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+  .btn-accent:hover {
+    box-shadow: 0 6px 18px rgba(224, 138, 101, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  }
+  
+  .btn-neutral {
+    background: linear-gradient(135deg, #3A3730 0%, #2A2822 100%);
+    color: var(--text);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+  }
+  .btn-neutral:hover {
+    background: linear-gradient(135deg, #46423A 0%, #312E27 100%);
+    border-color: rgba(255, 255, 255, 0.18);
+    color: #FFFFFF;
+  }
+  
+  .btn-danger {
+    background: linear-gradient(135deg, #E08277 0%, #C55E52 100%);
+    color: #FFFFFF;
+    box-shadow: 0 4px 14px rgba(224, 130, 119, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+  .btn-danger:hover {
+    box-shadow: 0 6px 18px rgba(224, 130, 119, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  }
+
   footer { display:flex; align-items:center; justify-content:center; gap:8px; margin-top:20px; font-size:12px; color:var(--text-soft); }
   .sep { opacity:.5; }
   .refresh-link { color:var(--accent); text-decoration:none; font-weight:600; }
