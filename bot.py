@@ -1198,92 +1198,94 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write("Bot is running! (dashboard error, see logs)".encode("utf-8"))
 
-    def do_POST(self):
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            raw = self.rfile.read(length).decode("utf-8") if length else ""
-            fields = urllib.parse.parse_qs(raw)
+def do_POST(self):
+    try:
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length).decode("utf-8") if length else ""
+        fields = urllib.parse.parse_qs(raw)
 
-            required_password = os.environ.get("DASHBOARD_PASSWORD")
-            given_password = fields.get("password", [""])[0]
-            if required_password and given_password != required_password:
-                self.send_response(403)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.end_headers()
-                self.wfile.write("รหัสผ่านไม่ถูกต้อง".encode("utf-8"))
-                return
+        required_password = os.environ.get("DASHBOARD_PASSWORD")
+        given_password = fields.get("password", [""])[0]
 
-            if self.path == "/control/pause":
-                control = load_control()
-                control["paused"] = not control.get("paused", False)
-                save_control(control)
-                logger.info(f"[เว็บควบคุม] ตั้งค่า paused={control['paused']}")
-
-            elif self.path == "/control/symbol":
-                requested = fields.get("symbol", [""])[0].strip().upper()
-                if re.match(r"^[A-Z0-9]{2,20}$", requested):
-                    control = load_control()
-                    control["active_symbol"] = requested
-                    save_control(control)
-                    logger.info(f"[เว็บควบคุม] คำขอเปลี่ยนเหรียญเป็น {requested}")
-                else:
-                    logger.warning(f"[เว็บควบคุม] ปฏิเสธคำขอเปลี่ยนเหรียญ: รูปแบบไม่ถูกต้อง ({requested})")
-
-            elif self.path == "/control/trade_size":
-                raw_value = fields.get("trade_size_percent", [""])[0].strip()
-                try:
-                    value = float(raw_value)
-                except ValueError:
-                    value = None
-                if value is not None and 1 <= value <= 100:
-                    control = load_control()
-                    control["trade_size_percent"] = value
-                    save_control(control)
-                    logger.info(f"[เว็บควบคุม] ตั้งค่าอัตราเงินที่ใช้เข้าซื้อต่อไม้เป็น {value}%")
-                else:
-                    logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าอัตราเงินที่ใช้เข้าซื้อ: '{raw_value}' (ต้องอยู่ระหว่าง 1-100)")
-
-            elif self.path == "/control/max_losses":
-                raw_value = fields.get("max_consecutive_losses", [""])[0].strip()
-                try:
-                    value = int(float(raw_value))
-                except ValueError:
-                    value = None
-                if value is not None and 1 <= value <= 20:
-                    control = load_control()
-                    control["max_consecutive_losses"] = value
-                    save_control(control)
-                    logger.info(f"[เว็บควบคุม] ตั้งค่าจำนวนไม้ขาดทุนติดกันก่อนหยุดเป็น {value} ไม้")
-                else:
-                    logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าจำนวนไม้ขาดทุนติดกัน: '{raw_value}' (ต้องอยู่ระหว่าง 1-20)")
-
-            elif self.path == "/control/risk":
-                raw_value = fields.get("max_daily_loss_percent", [""])[0].strip()
-                try:
-                    value = float(raw_value)
-                except ValueError:
-                    value = None
-                if value is not None and 0.1 <= value <= 100:
-                    control = load_control()
-                    control["max_daily_loss_percent"] = value
-                    save_control(control)
-                    logger.info(f"[เว็บควบคุม] ตั้งค่าขาดทุนสูงสุดต่อวันเป็น {value}%")
-                else:
-                    logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าขาดทุนสูงสุดต่อวัน: '{raw_value}' (ต้องอยู่ระหว่าง 0.1-100)")
-
-            elif self.path == "/control/unlock":
-                control = load_control()
-                control["unlock_requested"] = True
-                save_control(control)
-                logger.info("[เว็บควบคุม] ได้รับคำขอปลดล็อกบอท (HALTED -> IDLE) — จะมีผลในรอบ loop ถัดไป (ภายใน 60 วิ)")
-
-            self.send_response(303)
-            self.send_header("Location", "/")
+        if required_password and given_password != required_password:
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
-        except Exception as e:
-            logger.error(f"Dashboard control error: {e}")
-            self.send_response(500)
-            self.end_headers()
+            self.wfile.write("รหัสผ่านไม่ถูกต้อง".encode("utf-8"))
+            return
+
+        if self.path == "/control/pause":
+            control = load_control()
+            control["paused"] = not control.get("paused", False)
+            save_control(control)
+            logger.info(f"[เว็บควบคุม] ตั้งค่า paused={control['paused']}")
+
+        elif self.path == "/control/symbol":
+            requested = fields.get("symbol", [""])[0].strip().upper()
+            if re.match(r"^[A-Z0-9]{2,20}$", requested):
+                control = load_control()
+                control["active_symbol"] = requested
+                save_control(control)
+                logger.info(f"[เว็บควบคุม] คำขอเปลี่ยนเหรียญเป็น {requested}")
+            else:
+                logger.warning(f"[เว็บควบคุม] ปฏิเสธคำขอเปลี่ยนเหรียญ: รูปแบบไม่ถูกต้อง ({requested})")
+
+        elif self.path == "/control/trade_size":
+            raw_value = fields.get("trade_size_percent", [""])[0].strip()
+            try:
+                value = float(raw_value)
+            except ValueError:
+                value = None
+            if value is not None and 1 <= value <= 100:
+                control = load_control()
+                control["trade_size_percent"] = value
+                save_control(control)
+                logger.info(f"[เว็บควบคุม] ตั้งค่าอัตราเงินที่ใช้เข้าซื้อต่อไม้เป็น {value}%")
+            else:
+                logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าอัตราเงินที่ใช้เข้าซื้อ: '{raw_value}' (ต้องอยู่ระหว่าง 1-100)")
+
+        elif self.path == "/control/max_losses":
+            raw_value = fields.get("max_consecutive_losses", [""])[0].strip()
+            try:
+                value = int(float(raw_value))
+            except ValueError:
+                value = None
+            if value is not None and 1 <= value <= 20:
+                control = load_control()
+                control["max_consecutive_losses"] = value
+                save_control(control)
+                logger.info(f"[เว็บควบคุม] ตั้งค่าจำนวนไม้ขาดทุนติดกันก่อนหยุดเป็น {value} ไม้")
+            else:
+                logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าจำนวนไม้ขาดทุนติดกัน: '{raw_value}' (ต้องอยู่ระหว่าง 1-20)")
+
+        elif self.path == "/control/risk":
+            raw_value = fields.get("max_daily_loss_percent", [""])[0].strip()
+            try:
+                value = float(raw_value)
+            except ValueError:
+                value = None
+            if value is not None and 0.1 <= value <= 100:
+                control = load_control()
+                control["max_daily_loss_percent"] = value
+                save_control(control)
+                logger.info(f"[เว็บควบคุม] ตั้งค่าขาดทุนสูงสุดต่อวันเป็น {value}%")
+            else:
+                logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าขาดทุนสูงสุดต่อวัน: '{raw_value}' (ต้องอยู่ระหว่าง 0.1-100)")
+
+        elif self.path == "/control/unlock":
+            control = load_control()
+            control["unlock_requested"] = True
+            save_control(control)
+            logger.info("[เว็บควบคุม] ได้รับคำขอปลดล็อกบอท (HALTED -> IDLE) — จะมีผลในรอบ loop ถัดไป (ภายใน 60 วิ)")
+
+        self.send_response(303)
+        self.send_header("Location", "/")
+        self.end_headers()
+
+    except Exception as e:
+        logger.error(f"Dashboard control error: {e}")
+        self.send_response(500)
+        self.end_headers()
 
 
 def start_dummy_health_check_server():
