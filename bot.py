@@ -1213,7 +1213,7 @@ if __name__ == "__main__":
     health_thread = threading.Thread(target=start_dummy_health_check_server, daemon=True)
     health_thread.start()
 
-    POLL_INTERVAL_SEC = 25
+    POLL_INTERVAL_SEC = 20
 
     control = load_control()
     save_control(control)  # เขียนกลับให้ path บน Firebase มีค่าเริ่มต้นแน่นอนตั้งแต่แรก
