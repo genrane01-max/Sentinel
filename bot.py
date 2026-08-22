@@ -357,15 +357,6 @@ class InnovestXTradingBot:
             return None  # ข้อมูล ณ ช่วงเวลานั้นขาดหายไปเกินไป ถือว่าไม่พอ
         return closest[1]
 
-    def _price_open_current_hour(self):
-        history = self.state["price_history"]
-        if not history:
-            return None
-        now = time.time()
-        hour_start = now - (now % 3600)
-        candidates = [p for ts, p in history if ts >= hour_start]
-        return candidates[0] if candidates else history[0][1]
-
     def _has_enough_history(self):
         history = self.state["price_history"]
         if not history:
@@ -592,23 +583,21 @@ class InnovestXTradingBot:
             price_1h_ago = self._price_at_offset(3600)
             price_2h_ago = self._price_at_offset(7200)
             price_3h_ago = self._price_at_offset(10800)
-            price_open_1h = self._price_open_current_hour()
 
-            if price_1h_ago is None or price_open_1h is None:
+            if price_1h_ago is None:
                 logger.info("ข้อมูลราคาบางช่วงขาดหาย (gap) รอรอบถัดไป")
                 return
 
             direction, confidence = self._trend_confidence(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
-            rule_current_hour_green = current_price > price_open_1h
 
-            logger.info(f"ทิศทาง 1ชม: {direction or 'flat'} (ยืนยัน {confidence}%) | ชม.นี้เขียว: {rule_current_hour_green}")
+            logger.info(f"ทิศทาง 1ชม: {direction or 'flat'} (ยืนยัน {confidence}%)")
 
             if direction == "down":
                 logger.info(f"⚠️ เห็นสัญญาณขาลง (ยืนยัน {confidence}%) — ข้ามรอบนี้ ไม่เข้าซื้อ")
                 return
 
             MIN_CONFIDENCE_TO_BUY = 50  # ต้องมี 2ชม. หรือ 3ชม. ยืนยันทิศทางเดียวกันอย่างน้อย 1 ใน 2 (ปรับตัวเลขนี้ได้เลย)
-            if direction != "up" or confidence < MIN_CONFIDENCE_TO_BUY or not rule_current_hour_green:
+            if direction != "up" or confidence < MIN_CONFIDENCE_TO_BUY:
                 return
 
             thb_free, _, has_pending = self.get_free_balance()
