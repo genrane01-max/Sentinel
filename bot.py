@@ -878,7 +878,7 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
       <div class="brand">
         <svg class="spark" viewBox="0 0 24 24"><path d="M12 0c.6 3.8 2.2 6.4 5 8.2 2.8 1.8 5.4 2 7 2-1.6 0-4.2.2-7 2C14.2 14 12.6 16.6 12 20.4c-.6-3.8-2.2-6.4-5-8.2-2.8-1.8-5.4-2-7-2 1.6 0 4.2-.2 7-2C9.8 6.4 11.4 3.8 12 0z"/></svg>
         <div>
-          <div class="brand-title">InnovestX Bot</div>
+          <div class="brand-title">Sentinel</div>
           <div class="brand-sub">${symbol_display} · Price Action 3H</div>
         </div>
       </div>
