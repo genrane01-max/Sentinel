@@ -1180,6 +1180,11 @@ def render_dashboard(running_symbol, state, control):
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # กัน log ของ http.server เองไปปนกับ log ของบอท (คำขอ GET ทุกครั้งไม่จำเป็นต้องขึ้น log)
+    
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
 
     def do_GET(self):
         # 1. เพิ่มส่วนนี้: ถ้า UptimeRobot ยิงมาที่ /health ให้ตอบ OK สั้นๆ กลับไปทันที
