@@ -48,7 +48,7 @@ logging.basicConfig(
         logging.StreamHandler(),
     ],
 )
-logger = logging.getLogger("InnovestXBot")
+logger = logging.getLogger("Sentinel")
 
 # ==================== Firebase (state persistence) ====================
 def init_firebase():
