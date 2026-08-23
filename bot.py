@@ -1042,14 +1042,39 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
 
 ${unlock_button_html}
 
-<form class="control-card" method="POST" action="/control/pause">
-<div class="toggle-row">
-<div>
-<div class="control-label">การเทรดอัตโนมัติ</div>
-<div class="control-sub">${pause_sub}</div>
-</div>
+<form class="control-card" method="POST" action="/control/settings">
+<div class="control-label">ตั้งค่าบอท</div>
+<div class="control-sub">ปรับค่าไหนก็ได้พร้อมกัน ใส่รหัสครั้งเดียวแล้วกดบันทึกทีเดียว</div>
+
+<label style="display:flex; align-items:center; gap:8px; margin-top:14px; font-size:13px; color:var(--text); cursor:pointer;">
+<input type="checkbox" name="paused" value="1" ${paused_checked} style="width:16px;height:16px;flex-shrink:0;">
+หยุดเทรดอัตโนมัติชั่วคราว (${pause_sub})
+</label>
+
+<div class="control-label" style="font-size:12px; margin-top:16px;">อัตราเงินที่ใช้เข้าซื้อต่อไม้ (% ของเงินว่าง)</div>
+<input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="100"
+name="trade_size_percent" value="${trade_size_percent}">
+<div class="control-sub">ถ้าอยากถือ ${max_open_positions} เหรียญพร้อมกัน แนะนำตั้งประมาณ ${suggested_trade_size}%
+ต่อไม้ ไม่งั้นไม้แรกจะกินเงินเกือบหมด</div>
+
+<div class="control-label" style="font-size:12px; margin-top:16px;">ถือได้พร้อมกันกี่เหรียญ</div>
+<input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="10"
+name="max_open_positions" value="${max_open_positions}">
+<div class="control-sub">${size_hint_html}</div>
+
+<div class="control-label" style="font-size:12px; margin-top:16px;">ขาดทุนติดกันกี่ไม้ถึงหยุด</div>
+<input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="20"
+name="max_consecutive_losses" value="${max_consecutive_losses}">
+<div class="control-sub">นับรวมทุกเหรียญในบัญชี ถ้าขาดทุนติดกันครบจำนวนนี้ จะหยุดเปิดไม้ใหม่</div>
+
+<div class="control-label" style="font-size:12px; margin-top:16px;">ขาดทุนสูงสุดที่ยอมรับต่อวัน (%)</div>
+<input class="symbol-input" style="text-transform:none;" type="number" step="0.1" min="0.1" max="100"
+name="max_daily_loss_percent" value="${max_daily_loss_percent}">
+<div class="control-sub">ถ้าขาดทุนสะสมวันนี้ถึง % นี้ บอทจะหยุดเปิดไม้ใหม่ (โพซิชันที่ถืออยู่ยังถูกดูแลต่อ)</div>
+
+<div class="field-row">
 ${password_field_html}
-<button type="submit" class="btn ${pause_btn_class}">${pause_btn_label}</button>
+<button type="submit" class="btn btn-accent">บันทึกการตั้งค่าทั้งหมด</button>
 </div>
 </form>
 
@@ -1069,51 +1094,6 @@ autocapitalize="characters" autocomplete="off">
 <div class="field-row">
 ${password_field_html}
 <button type="submit" class="btn btn-accent">เพิ่มเหรียญ</button>
-</div>
-</form>
-
-<form class="control-card" method="POST" action="/control/max_positions">
-<div class="control-label">ถือได้พร้อมกันกี่เหรียญ (กำลังตั้ง: ${max_open_positions} ช่อง)</div>
-<input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="10"
-name="max_open_positions" value="${max_open_positions}">
-<div class="control-sub">${size_hint_html}</div>
-<div class="field-row">
-${password_field_html}
-<button type="submit" class="btn btn-accent">บันทึกค่า</button>
-</div>
-</form>
-
-<form class="control-card" method="POST" action="/control/trade_size">
-<div class="control-label">อัตราเงินที่ใช้เข้าซื้อต่อไม้ (กำลังตั้ง: ${trade_size_percent}% ของเงินว่าง)</div>
-<input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="100"
-name="trade_size_percent" value="${trade_size_percent}">
-<div class="control-sub">ถ้าอยากถือ ${max_open_positions} เหรียญพร้อมกัน แนะนำตั้งประมาณ ${suggested_trade_size}%
-ต่อไม้ ไม่งั้นไม้แรกจะกินเงินเกือบหมด</div>
-<div class="field-row">
-${password_field_html}
-<button type="submit" class="btn btn-accent">บันทึกค่า</button>
-</div>
-</form>
-
-<form class="control-card" method="POST" action="/control/max_losses">
-<div class="control-label">ขาดทุนติดกันกี่ไม้ถึงหยุด (กำลังตั้ง: ${max_consecutive_losses} ไม้)</div>
-<input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="20"
-name="max_consecutive_losses" value="${max_consecutive_losses}">
-<div class="control-sub">นับรวมทุกเหรียญในบัญชี ถ้าขาดทุนติดกันครบจำนวนนี้ จะหยุดเปิดไม้ใหม่</div>
-<div class="field-row">
-${password_field_html}
-<button type="submit" class="btn btn-accent">บันทึกค่า</button>
-</div>
-</form>
-
-<form class="control-card" method="POST" action="/control/risk">
-<div class="control-label">ขาดทุนสูงสุดที่ยอมรับต่อวัน (กำลังตั้ง: ${max_daily_loss_percent}%)</div>
-<input class="symbol-input" style="text-transform:none;" type="number" step="0.1" min="0.1" max="100"
-name="max_daily_loss_percent" value="${max_daily_loss_percent}">
-<div class="control-sub">ถ้าขาดทุนสะสมวันนี้ถึง % นี้ บอทจะหยุดเปิดไม้ใหม่ (โพซิชันที่ถืออยู่ยังถูกดูแลต่อ)</div>
-<div class="field-row">
-${password_field_html}
-<button type="submit" class="btn btn-accent">บันทึกค่า</button>
 </div>
 </form>
 
@@ -1194,12 +1174,20 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
     active_max_consecutive_losses = control.get("max_consecutive_losses", InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES)
     max_open = int(control.get("max_open_positions", InnovestXTradingBot.DEFAULT_MAX_OPEN_POSITIONS) or 3)
 
+    # เหรียญที่ถูกลบออกจาก watchlist แล้ว แต่ backend ยังถืออยู่ (รอขายก่อนเลิกเฝ้า)
+    # ต้องรวมเข้ามานับ/แสดงผลด้วย ไม่งั้นตัวเลข "ถืออยู่ X/Y ช่อง" และ PnL รวมบนหน้าเว็บจะต่ำกว่าความจริง
+    pending_remove = [
+        s for s in (RUNNING_WATCHLIST.get("value") or [])
+        if s not in watchlist
+    ]
+    display_symbols = list(dict.fromkeys(watchlist + pending_remove))
+
     holding_symbols = []
     newest_ts = None
     total_unrealized = 0.0
     waiting_history = 0
 
-    for sym in watchlist:
+    for sym in display_symbols:
         st = states_by_symbol.get(sym) or {}
         if st.get("status") == "HOLDING":
             holding_symbols.append(sym)
@@ -1280,10 +1268,6 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             "— จะไม่เปิดออเดอร์ใหม่จนกว่าจะกด เริ่มเทรดต่อ</div>"
         )
 
-    pending_remove = [
-        s for s in (RUNNING_WATCHLIST.get("value") or [])
-        if s not in watchlist
-    ]
     if pending_remove:
         banners.append(
             f'<div class="banner banner-info">กำลังรอขายก่อนเอาออกจากรายการ: '
@@ -1344,17 +1328,19 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
     cards_html = "".join(cards)
 
     coin_parts = ['<div class="coin-list">']
-    if not watchlist:
+    if not display_symbols:
         coin_parts.append(
             '<div class="coin-card"><div class="coin-sub">ยังไม่มีเหรียญในรายการ — เพิ่มด้านล่างได้เลย</div></div>'
         )
-    for sym in watchlist:
+    for sym in display_symbols:
         st = states_by_symbol.get(sym) or {}
         status = st.get("status", "IDLE")
         direction, confidence, current, change_1h, elapsed = _trend_from_state(st)
         holding_cls = " is-holding" if status == "HOLDING" else ""
         price_txt = f"{_fmt_thb(current)} ฿" if current is not None else "—"
         chips = []
+        if sym in pending_remove:
+            chips.append('<span class="chip down">รอขายก่อนเอาออก</span>')
         if status == "HOLDING":
             chips.append('<span class="chip hold">ถืออยู่</span>')
             entry = float(st.get("entry_price", 0.0) or 0.0)
@@ -1415,12 +1401,10 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
 
     if control.get("paused"):
         pause_sub = "ตอนนี้: หยุดอยู่ (ไม่เปิดออเดอร์ใหม่)"
-        pause_btn_class = "btn-accent"
-        pause_btn_label = "เริ่มเทรดต่อ"
+        paused_checked = "checked"
     else:
         pause_sub = "ตอนนี้: กำลังสแกนเหรียญในรายการ"
-        pause_btn_class = "btn-neutral"
-        pause_btn_label = "หยุดชั่วคราว"
+        paused_checked = ""
 
     last_updated = datetime.now().strftime("%H:%M:%S")
     suggested = max(1, int(round(100.0 / max_open)))
@@ -1453,8 +1437,7 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         coin_cards_html=coin_cards_html,
         unlock_button_html=unlock_button_html,
         pause_sub=pause_sub,
-        pause_btn_class=pause_btn_class,
-        pause_btn_label=pause_btn_label,
+        paused_checked=paused_checked,
         watchlist_rows_html=watchlist_rows_html,
         max_open_positions=max_open,
         suggested_trade_size=suggested,
@@ -1525,11 +1508,59 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 self.wfile.write("รหัสผ่านไม่ถูกต้อง".encode("utf-8"))
                 return
 
-            if self.path == "/control/pause":
+            if self.path == "/control/settings":
                 control = load_control()
-                control["paused"] = not control.get("paused", False)
+                changes = []
+
+                control["paused"] = "paused" in fields
+                changes.append(f"paused={control['paused']}")
+
+                raw_value = fields.get("trade_size_percent", [""])[0].strip()
+                try:
+                    value = float(raw_value)
+                except ValueError:
+                    value = None
+                if value is not None and 1 <= value <= 100:
+                    control["trade_size_percent"] = value
+                    changes.append(f"trade_size_percent={value}%")
+                else:
+                    logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าอัตราเงินที่ใช้เข้าซื้อ: '{raw_value}' (ต้องอยู่ระหว่าง 1-100)")
+
+                raw_value = fields.get("max_open_positions", [""])[0].strip()
+                try:
+                    value = int(float(raw_value))
+                except ValueError:
+                    value = None
+                if value is not None and 1 <= value <= 10:
+                    control["max_open_positions"] = value
+                    changes.append(f"max_open_positions={value}")
+                else:
+                    logger.warning(f"[เว็บควบคุม] ปฏิเสธจำนวนช่องถือ: '{raw_value}' (ต้องอยู่ระหว่าง 1-10)")
+
+                raw_value = fields.get("max_consecutive_losses", [""])[0].strip()
+                try:
+                    value = int(float(raw_value))
+                except ValueError:
+                    value = None
+                if value is not None and 1 <= value <= 20:
+                    control["max_consecutive_losses"] = value
+                    changes.append(f"max_consecutive_losses={value}")
+                else:
+                    logger.warning(f"[เว็บควบคุม] ปฏิเสธจำนวนไม้ขาดทุนติดกัน: '{raw_value}' (ต้องอยู่ระหว่าง 1-20)")
+
+                raw_value = fields.get("max_daily_loss_percent", [""])[0].strip()
+                try:
+                    value = float(raw_value)
+                except ValueError:
+                    value = None
+                if value is not None and 0.1 <= value <= 100:
+                    control["max_daily_loss_percent"] = value
+                    changes.append(f"max_daily_loss_percent={value}%")
+                else:
+                    logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าขาดทุนสูงสุดต่อวัน: '{raw_value}' (ต้องอยู่ระหว่าง 0.1-100)")
+
                 save_control(control)
-                logger.info(f"[เว็บควบคุม] ตั้งค่า paused={control['paused']}")
+                logger.info(f"[เว็บควบคุม] บันทึกการตั้งค่า: {', '.join(changes)}")
 
             elif self.path in ("/control/symbol", "/control/watchlist/add"):
                 requested = ""
@@ -1557,62 +1588,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 control["watchlist"] = watchlist
                 save_control(control)
                 logger.info(f"[เว็บควบคุม] ขอเอา {requested} ออกจากรายการเฝ้า เหลือ {watchlist}")
-
-            elif self.path == "/control/max_positions":
-                raw_value = fields.get("max_open_positions", [""])[0].strip()
-                try:
-                    value = int(float(raw_value))
-                except ValueError:
-                    value = None
-                if value is not None and 1 <= value <= 10:
-                    control = load_control()
-                    control["max_open_positions"] = value
-                    save_control(control)
-                    logger.info(f"[เว็บควบคุม] ตั้งค่าถือได้พร้อมกัน {value} เหรียญ")
-                else:
-                    logger.warning(f"[เว็บควบคุม] ปฏิเสธจำนวนช่องถือ: '{raw_value}' (ต้องอยู่ระหว่าง 1-10)")
-
-            elif self.path == "/control/trade_size":
-                raw_value = fields.get("trade_size_percent", [""])[0].strip()
-                try:
-                    value = float(raw_value)
-                except ValueError:
-                    value = None
-                if value is not None and 1 <= value <= 100:
-                    control = load_control()
-                    control["trade_size_percent"] = value
-                    save_control(control)
-                    logger.info(f"[เว็บควบคุม] ตั้งค่าอัตราเงินที่ใช้เข้าซื้อต่อไม้เป็น {value}%")
-                else:
-                    logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าอัตราเงินที่ใช้เข้าซื้อ: '{raw_value}' (ต้องอยู่ระหว่าง 1-100)")
-
-            elif self.path == "/control/max_losses":
-                raw_value = fields.get("max_consecutive_losses", [""])[0].strip()
-                try:
-                    value = int(float(raw_value))
-                except ValueError:
-                    value = None
-                if value is not None and 1 <= value <= 20:
-                    control = load_control()
-                    control["max_consecutive_losses"] = value
-                    save_control(control)
-                    logger.info(f"[เว็บควบคุม] ตั้งค่าจำนวนไม้ขาดทุนติดกันก่อนหยุดเป็น {value} ไม้")
-                else:
-                    logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าจำนวนไม้ขาดทุนติดกัน: '{raw_value}' (ต้องอยู่ระหว่าง 1-20)")
-
-            elif self.path == "/control/risk":
-                raw_value = fields.get("max_daily_loss_percent", [""])[0].strip()
-                try:
-                    value = float(raw_value)
-                except ValueError:
-                    value = None
-                if value is not None and 0.1 <= value <= 100:
-                    control = load_control()
-                    control["max_daily_loss_percent"] = value
-                    save_control(control)
-                    logger.info(f"[เว็บควบคุม] ตั้งค่าขาดทุนสูงสุดต่อวันเป็น {value}%")
-                else:
-                    logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าขาดทุนสูงสุดต่อวัน: '{raw_value}' (ต้องอยู่ระหว่าง 0.1-100)")
 
             elif self.path == "/control/unlock":
                 control = load_control()
