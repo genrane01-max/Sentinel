@@ -22,11 +22,19 @@ def _install_mocks():
 
     class _DB:
         @staticmethod
-        def reference(_path):
+        def reference(_path, app=None):
             return _Ref()
 
     fa.credentials = _Cred
     fa.db = _DB
+    fa.initialize_app = lambda *a, **k: "app"
+
+    def _get_app(name=None):
+        if name == "market":
+            raise ValueError("Requested app 'market' not found")
+        return "app"
+
+    fa.get_app = _get_app
     sys.modules["firebase_admin"] = fa
     cred_mod = types.ModuleType("firebase_admin.credentials")
     cred_mod.Certificate = _Cred.Certificate
@@ -67,6 +75,24 @@ class ParseMarketPriceTests(unittest.TestCase):
             },
         }
         self.assertAlmostEqual(bot.parse_market_price(payload), 101.0)
+        quote = bot.parse_market_quote(payload)
+        self.assertAlmostEqual(quote["bid"], 100.0)
+        self.assertAlmostEqual(quote["ask"], 102.0)
+        self.assertAlmostEqual(quote["spread_pct"], (2.0 / 101.0) * 100, places=4)
+
+    def test_quote_prefers_last_for_history_ask_for_buy(self):
+        payload = {
+            "code": "0000",
+            "data": {
+                "lastTradePrice": "101.0",
+                "bids": [["100.0", "1"]],
+                "asks": [["102.0", "1"]],
+            },
+        }
+        quote = bot.parse_market_quote(payload)
+        self.assertAlmostEqual(bot.quote_mark_price(quote, "last"), 101.0)
+        self.assertAlmostEqual(bot.quote_mark_price(quote, "buy"), 102.0)
+        self.assertAlmostEqual(bot.quote_mark_price(quote, "sell"), 100.0)
 
     def test_dict_bid_as_objects(self):
         payload = {

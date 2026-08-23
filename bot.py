@@ -1,12 +1,13 @@
 """
 InnovestX Automated Trading Bot — Price Action 2H Strategy
-(v6, เข้าซื้อด้วย 2 ชม.เป็นหลัก / ชม.3 ห้ามซื้อถ้าลงแรง)
+(v7, เข้าซื้อด้วย 2 ชม.เป็นหลัก / ชม.3 ห้ามซื้อถ้าลงแรง / bid-offer ลงฐานที่ 2)
 
 ของใหม่ในเวอร์ชันนี้:
 1. สูตรเข้าซื้อใช้ 2 ชั่วโมงเป็นหลัก (ชม.1 + ชม.2 ต้องขึ้น, สุทธิ 2 ชม. ต้องบวก)
 2. ชม.ที่ 3 ไม่ยืนยันซื้อแล้ว — ใช้แค่ห้ามซื้อถ้าลงแรงเกิน −1.5%
-3. การ์ดตั้งค่าบอทพับได้ เหลือแถวสรุปตอนหุบ
-4. แดชบอร์ดใช้สูตรเดียวกับบอท
+3. แยก Firebase: ฐานหลัก = สถานะเทรด/ตั้งค่า, ฐานที่ 2 = bid/offer + ประวัติราคา
+4. ตัดสินใจซื้อเทียบ offer (ask), ขายเทียบ bid, กันสเปรดกว้าง
+5. แดชบอร์ดใช้สูตรเดียวกับบอท
 
 ของเดิมยังอยู่ครบ: แดชบอร์ด, หยุด/เริ่มเทรด, รหัสผ่าน, % ขาดทุนต่อวัน, อัตราเงินต่อไม้,
 จำนวนไม้ขาดทุนติดกัน, price_history ต่อเหรียญ, ค่าธรรมเนียม, circuit breaker, Decimal, graceful shutdown
@@ -43,15 +44,79 @@ logging.basicConfig(
 logger = logging.getLogger("Sentinel")
 
 # ==================== Firebase (state persistence) ====================
+# ฐานหลัก (DB1): bot_control, shared risk, สถานะไม้
+# ฐานที่ 2 (DB2): bid/offer + ประวัติราคา — ตั้ง FIREBASE_DATABASE_URL_2 เมื่อพร้อม
+MARKET_APP_NAME = "market"
+_market_db_enabled = False
+
+
 def init_firebase():
+    global _market_db_enabled
     try:
         if not firebase_admin._apps:
-            cred = credentials.Certificate("/etc/secrets/firebase.json")
+            cred_path = os.getenv("FIREBASE_CREDENTIALS", "/etc/secrets/firebase.json")
+            cred = credentials.Certificate(cred_path)
             db_url = os.getenv("FIREBASE_DATABASE_URL")
             firebase_admin.initialize_app(cred, {"databaseURL": db_url})
-            logger.info("Firebase Realtime Database เชื่อมต่อสำเร็จ")
+            logger.info("Firebase DB1 (สถานะเทรด) เชื่อมต่อสำเร็จ")
+
+            db_url_2 = (os.getenv("FIREBASE_DATABASE_URL_2") or "").strip()
+            if db_url_2:
+                cred2_path = os.getenv("FIREBASE_CREDENTIALS_2", "/etc/secrets/firebase2.json")
+                cred2 = credentials.Certificate(cred2_path) if cred2_path and os.path.isfile(cred2_path) else cred
+                firebase_admin.initialize_app(cred2, {"databaseURL": db_url_2}, name=MARKET_APP_NAME)
+                _market_db_enabled = True
+                logger.info("Firebase DB2 (bid/offer + ประวัติราคา) เชื่อมต่อสำเร็จ")
+            else:
+                logger.warning(
+                    "ยังไม่มี FIREBASE_DATABASE_URL_2 — bid/offer และประวัติราคาจะลงฐานหลักไปก่อน "
+                    "จนกว่าจะเพิ่มฐานที่สอง"
+                )
+        else:
+            try:
+                firebase_admin.get_app(MARKET_APP_NAME)
+                _market_db_enabled = True
+            except (ValueError, KeyError):
+                _market_db_enabled = False
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
+
+
+def primary_ref(path):
+    """โหนดบนฐานหลัก (สถานะเทรด / ตั้งค่า)"""
+    return db.reference(path)
+
+
+def market_ref(path):
+    """โหนดบนฐานที่ 2 ถ้ามี ไม่งั้นใช้ฐานหลักที่ path เดิม"""
+    if _market_db_enabled:
+        try:
+            return db.reference(path, app=firebase_admin.get_app(MARKET_APP_NAME))
+        except Exception as e:
+            logger.warning(f"ใช้ DB2 ไม่ได้ ถอยไปฐานหลัก: {e}")
+    return db.reference(path)
+
+
+def market_db_ready():
+    return _market_db_enabled
+
+
+def load_symbol_view(symbol):
+    """รวมสถานะเทรดจาก DB1 กับ bid/offer+ประวัติจาก DB2 สำหรับแดชบอร์ด"""
+    try:
+        state = primary_ref(f"bots/{symbol}/state").get() or {}
+    except Exception:
+        state = {}
+    try:
+        market = market_ref(f"market/{symbol}").get() or {}
+    except Exception:
+        market = {}
+    if market.get("price_history"):
+        state["price_history"] = market["price_history"]
+    if market.get("quote"):
+        state["quote"] = market["quote"]
+    return state
+
 
 init_firebase()
 
@@ -72,6 +137,7 @@ HOUR3_VETO_PERCENT = -1.5        # ชม.3 ลงแรงกว่านี้
 # จะเทียบ confidence >= MIN_CONFIDENCE_TO_BUY มีค่าที่เป็นไปได้แค่ 100 เท่านั้น (ไม่เคยเป็น 80-99)
 # การจะเปลี่ยนพฤติกรรมซื้อจริงๆ ต้องไปแก้เงื่อนไขแต่ละขั้นตรงๆ ไม่ใช่แก้ตัวเลขนี้
 MIN_CONFIDENCE_TO_BUY = 80
+MAX_SPREAD_PERCENT = 0.5         # ไม่ซื้อถ้า (ask-bid)/mid กว้างเกินนี้ (%)
 
 
 def _pct_change(newer, older):
@@ -110,10 +176,11 @@ def _first_book_price(levels):
     return None
 
 
-def parse_market_price(payload):
-    """ดึงราคาจาก response ของ orderbook/ticker — รองรับ data เป็น dict หรือ list"""
+def parse_market_quote(payload):
+    """แยก last / bid / offer จาก orderbook หรือ ticker — ไม่ยุบเป็นราคาเดียว"""
+    quote = {"last": None, "bid": None, "ask": None, "mid": None, "spread_pct": None}
     if not isinstance(payload, dict) or payload.get("code") != "0000":
-        return None
+        return quote
     data = payload.get("data")
     record = None
     if isinstance(data, dict):
@@ -121,18 +188,39 @@ def parse_market_price(payload):
     elif isinstance(data, list) and data:
         record = data[0] if isinstance(data[0], dict) else None
     if not isinstance(record, dict):
-        return None
+        return quote
     for key in ("lastTradePrice", "last", "close", "lastPrice", "price"):
         val = _safe_float(record.get(key))
         if val is not None and val > 0:
-            return val
+            quote["last"] = val
+            break
     bids = record.get("bids") or record.get("bid") or []
     asks = record.get("asks") or record.get("ask") or []
-    best_bid = _first_book_price(bids)
-    best_ask = _first_book_price(asks)
-    if best_bid and best_ask:
-        return (best_bid + best_ask) / 2.0
-    return best_bid or best_ask
+    quote["bid"] = _first_book_price(bids)
+    quote["ask"] = _first_book_price(asks)
+    if quote["bid"] and quote["ask"]:
+        quote["mid"] = (quote["bid"] + quote["ask"]) / 2.0
+        if quote["mid"] > 0:
+            quote["spread_pct"] = (quote["ask"] - quote["bid"]) / quote["mid"] * 100
+    elif quote["bid"] or quote["ask"]:
+        quote["mid"] = quote["bid"] or quote["ask"]
+    return quote
+
+
+def parse_market_price(payload):
+    """ดึงราคาเดียวจาก orderbook/ticker — ชอบ last แล้วค่อย mid ของ bid/offer"""
+    quote = parse_market_quote(payload)
+    return quote["last"] or quote["mid"] or quote["bid"] or quote["ask"]
+
+
+def quote_mark_price(quote, side="last"):
+    """ราคาที่ใช้ตัดสินใจ: ซื้อใช้ offer, ขายใช้ bid, ประวัติใช้ last/mid"""
+    quote = quote or {}
+    if side == "buy":
+        return quote.get("ask") or quote.get("last") or quote.get("mid") or quote.get("bid")
+    if side == "sell":
+        return quote.get("bid") or quote.get("last") or quote.get("mid") or quote.get("ask")
+    return quote.get("last") or quote.get("mid") or quote.get("ask") or quote.get("bid")
 
 
 def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ago=None):
@@ -227,6 +315,7 @@ REASON_TH = {
     "hour2_down": "ชม.ก่อนหน้าลง — หักลบแล้วไม่ซื้อ",
     "weak_net": f"สุทธิ 2 ชม. ยังไม่ถึง +{MIN_NET_2H_PERCENT}%",
     "hour3_veto": f"ชม.3 ลงแรงกว่า {HOUR3_VETO_PERCENT}% — ห้ามซื้อ",
+    "wide_spread": f"สเปรดกว้างเกิน {MAX_SPREAD_PERCENT}% — ไม่ซื้อ",
     "weak": "คะแนนยังไม่ถึงเกณฑ์",
     "waiting_history": "รอสะสมข้อมูล 2 ชั่วโมง",
     "unknown": "ยังประเมินไม่ได้",
@@ -267,7 +356,7 @@ def _normalize_watchlist(raw, fallback_symbol):
 def load_control():
     """อ่านคำสั่งควบคุมล่าสุดจากหน้าเว็บ (รายการเหรียญที่เฝ้า, หยุดชั่วคราว, ความเสี่ยง, จำนวนช่องถือพร้อมกัน)"""
     try:
-        data = db.reference("bot_control").get() or {}
+        data = primary_ref("bot_control").get() or {}
     except Exception as e:
         logger.warning(f"อ่าน bot_control จาก Firebase ไม่ได้ ใช้ค่าเริ่มต้น: {e}")
         data = {}
@@ -337,7 +426,7 @@ def save_control(control):
             control["active_symbol"] = control["watchlist"][0]
         elif not control.get("active_symbol"):
             control["active_symbol"] = DEFAULT_SYMBOL
-        db.reference("bot_control").set(control)
+        primary_ref("bot_control").set(control)
     except Exception as e:
         logger.error(f"บันทึก bot_control ไป Firebase ไม่สำเร็จ: {e}")
 
@@ -352,7 +441,7 @@ def load_shared_risk():
         "consecutive_losses": 0,
     }
     try:
-        saved = db.reference(SHARED_RISK_PATH).get()
+        saved = primary_ref(SHARED_RISK_PATH).get()
         if saved:
             default.update(saved)
     except Exception as e:
@@ -362,7 +451,7 @@ def load_shared_risk():
 
 def save_shared_risk(risk):
     try:
-        db.reference(SHARED_RISK_PATH).set(risk)
+        primary_ref(SHARED_RISK_PATH).set(risk)
     except Exception as e:
         logger.error(f"บันทึก shared risk ไป Firebase ไม่สำเร็จ: {e}")
 
@@ -405,6 +494,7 @@ class InnovestXTradingBot:
         self.host = "api.innovestxonline.com"
         self.base_url = f"https://{self.host}"
         self.state_path = f"bots/{symbol}/state"
+        self.market_path = f"market/{symbol}"
 
         self.trailing_stop_percent = trailing_stop_percent
         self.stop_loss_percent = stop_loss_percent
@@ -431,14 +521,15 @@ class InnovestXTradingBot:
             "highest_price": 0.0,
             "quantity": 0.0,
             "roundtrip_fee_percent": self.DEFAULT_ROUNDTRIP_FEE_PERCENT,
-            "price_history": [],  # [[timestamp_sec, price], ...] เก็บย้อนหลัง 3 ชม.
+            "price_history": [],  # [[timestamp_sec, price], ...] เก็บย้อนหลัง 3 ชม. อยู่บน DB2
+            "quote": {},          # bid/ask/last/spread ล่าสุด อยู่บน DB2
             "trade_date": None,   # "YYYY-MM-DD" (UTC) สำหรับรีเซ็ต circuit breaker รายวัน
             "daily_start_balance": 0.0,
             "daily_realized_pnl": 0.0,
             "consecutive_losses": 0,
         }
         try:
-            saved = db.reference(self.state_path).get()
+            saved = primary_ref(self.state_path).get()
             if saved:
                 default_state.update(saved)
                 logger.info(f"โหลดสถานะบอทจาก Firebase สำเร็จ: status={default_state['status']}")
@@ -446,19 +537,50 @@ class InnovestXTradingBot:
                 logger.info("ยังไม่มีสถานะเดิมบน Firebase (path ว่าง) — เริ่มจากค่าเริ่มต้น")
         except Exception as e:
             logger.warning(f"อ่านสถานะจาก Firebase ไม่ได้ กำลังใช้ค่าเริ่มต้น: {e}")
-        return default_state
+        default_state["price_history"] = list(default_state.get("price_history") or [])
+        default_state["quote"] = dict(default_state.get("quote") or {})
+        self.state = default_state
+        self.load_market()
+        return self.state
+
+    def load_market(self):
+        """โหลด bid/offer + ประวัติราคาจากฐานที่ 2 (หรือฐานหลักถ้ายังไม่เพิ่ม DB2)"""
+        try:
+            saved = market_ref(self.market_path).get() or {}
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] อ่านข้อมูลตลาดจาก DB2 ไม่ได้: {e}")
+            saved = {}
+        hist = saved.get("price_history") or []
+        quote = saved.get("quote") or {}
+        if not hist and self.state.get("price_history"):
+            hist = self.state["price_history"]
+            logger.info(f"[{self.symbol}] ย้ายประวัติราคาจากฐานหลักไป path ตลาด")
+        self.state["price_history"] = hist
+        if quote:
+            self.state["quote"] = quote
 
     def save_state(self):
         try:
-            db.reference(self.state_path).set(self.state)
+            payload = {k: v for k, v in self.state.items() if k not in ("price_history", "quote")}
+            primary_ref(self.state_path).set(payload)
         except Exception as e:
             logger.error(f"บันทึกสถานะไป Firebase ไม่สำเร็จ: {e}")
+
+    def save_market(self):
+        try:
+            market_ref(self.market_path).set({
+                "quote": self.state.get("quote") or {},
+                "price_history": self.state.get("price_history") or [],
+            })
+        except Exception as e:
+            logger.error(f"บันทึก bid/offer ไปฐานตลาดไม่สำเร็จ: {e}")
 
     def _handle_shutdown(self, signum, frame):
         logger.info(f"ได้รับสัญญาณหยุด ({signum}) กำลังบันทึกสถานะก่อนปิดบอท...")
         self._stop_requested = True
         STOP_ALL["value"] = True
         self.save_state()
+        self.save_market()
 
     def reconcile_state_on_startup(self):
         """เช็คว่า state ตรงกับยอดจริงในพอร์ตหรือไม่ — เรียกตอน start และเรียกซ้ำเป็นระยะระหว่างบอทรันผ่าน maybe_reconcile_periodically()"""
@@ -573,22 +695,22 @@ class InnovestXTradingBot:
         return data
 
     # ==================== Market data / price history ====================
-    def get_latest_price(self):
-        """ดึงราคาล่าสุด: ชอบ lastTradePrice ถ้ามี ไม่ครบก็ใช้ mid ของ best bid/ask แล้วค่อย fallback ticker"""
+    def get_latest_quote(self):
+        """ดึง last + best bid/offer จาก orderbook แล้วค่อย fallback ticker"""
         path = "/api/v1/digital-asset/orderbook/lvl2"
         body = {"symbol": self.symbol, "depth": 1}
         res = self.send_request("POST", path, body=body)
-        price = parse_market_price(res)
-        if price:
-            return price
+        quote = parse_market_quote(res)
+        if quote_mark_price(quote):
+            return quote
 
         ticker_res = self.send_request(
             "POST", "/api/v1/digital-asset/ticker/subscribe", body={"symbol": self.symbol}
         )
-        price = parse_market_price(ticker_res)
-        if price:
+        quote = parse_market_quote(ticker_res)
+        if quote_mark_price(quote):
             logger.info(f"[{self.symbol}] ใช้ราคาจาก ticker แทน orderbook")
-            return price
+            return quote
 
         if res and res.get("code") == "0000":
             logger.warning(f"[{self.symbol}] ดึงราคาไม่ได้ โครงสร้างไม่ตรงที่คาด: {json.dumps(res)[:800]}")
@@ -596,12 +718,20 @@ class InnovestXTradingBot:
             logger.warning(f"[{self.symbol}] ดึงราคาล่าสุดล้มเหลว")
         return None
 
+    def get_latest_price(self):
+        """ดึงราคาล่าสุดสำหรับประวัติแนวโน้ม (last หรือ mid) พร้อมเก็บ bid/offer ไว้ใน state"""
+        quote = self.get_latest_quote()
+        if not quote:
+            return None
+        self.state["quote"] = quote
+        return quote_mark_price(quote, "last")
+
     def _record_price_tick(self, price):
         now = time.time()
         self.state["price_history"].append([now, price])
         cutoff = now - 10800  # เก็บย้อนหลังแค่ 3 ชั่วโมงพอสำหรับกลยุทธ์
         self.state["price_history"] = [t for t in self.state["price_history"] if t[0] >= cutoff]
-        self.save_state()
+        self.save_market()
 
     def _price_at_offset(self, seconds_ago, tolerance_sec=300):
         history = self.state["price_history"]
@@ -876,6 +1006,15 @@ class InnovestXTradingBot:
             return empty
 
         signal = evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
+        quote = self.state.get("quote") or {}
+        spread = quote.get("spread_pct")
+        if signal["should_buy"] and spread is not None and spread > MAX_SPREAD_PERCENT:
+            signal["should_buy"] = False
+            signal["reason"] = "wide_spread"
+            logger.info(
+                f"[{self.symbol}] สเปรด {spread:.3f}% กว้างเกิน {MAX_SPREAD_PERCENT}% "
+                f"(bid {quote.get('bid')} / offer {quote.get('ask')}) — ไม่ซื้อ"
+            )
         reason_th = REASON_TH.get(signal["reason"], signal["reason"] or "พร้อมซื้อ")
         net_txt = f"{signal['net_2h']:+.2f}%" if signal["net_2h"] is not None else "n/a"
         h2_txt = f"{signal['change_2h']:+.2f}%" if signal["change_2h"] is not None else "n/a"
@@ -915,6 +1054,15 @@ class InnovestXTradingBot:
         if self.state["status"] != "IDLE":
             return False
 
+        quote = self.state.get("quote") or {}
+        spread = quote.get("spread_pct")
+        if spread is not None and spread > MAX_SPREAD_PERCENT:
+            logger.info(
+                f"[{self.symbol}] ข้ามการซื้อ: สเปรด {spread:.3f}% กว้างเกิน {MAX_SPREAD_PERCENT}%"
+            )
+            return False
+        expected_buy = quote_mark_price(quote, "buy") or current_price
+
         thb_free, _, has_pending = self.get_free_balance()
         if has_pending:
             logger.info(f"[{self.symbol}] ข้ามการซื้อ: มีออเดอร์ค้างอยู่ในระบบ")
@@ -947,15 +1095,15 @@ class InnovestXTradingBot:
 
         avg_price = self.confirm_fill_price(order_id)
         if not avg_price:
-            avg_price = current_price
-            logger.warning(f"[{self.symbol}] ยืนยันราคาจับคู่จริงไม่ได้ ใช้ราคาตลาด ณ ขณะนั้นแทน (ควรตรวจสอบ order ด้วยมือ)")
+            avg_price = expected_buy or current_price
+            logger.warning(f"[{self.symbol}] ยืนยันราคาจับคู่จริงไม่ได้ ใช้ราคา offer ณ ขณะนั้นแทน (ควรตรวจสอบ order ด้วยมือ)")
         if not avg_price:
             logger.error(f"[{self.symbol}] ไม่มีราคาสำหรับคำนวณจำนวนเหรียญ — ตั้ง HOLDING ชั่วคราว รอ reconcile")
             self.state.update({"status": "HOLDING", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
             self.save_state()
             return True
 
-        self._check_slippage(current_price, avg_price, "ซื้อ")
+        self._check_slippage(expected_buy or current_price, avg_price, "ซื้อ")
 
         fee_pct = self.estimate_roundtrip_fee_percent()
         one_way_fee_factor = (fee_pct / 2) / 100
@@ -991,8 +1139,13 @@ class InnovestXTradingBot:
             highest_price = self.state["highest_price"]
             qty = self.state["quantity"]
             fee_pct = self.state.get("roundtrip_fee_percent", self.DEFAULT_ROUNDTRIP_FEE_PERCENT)
+            quote = self.state.get("quote") or {}
+            sell_mark = quote_mark_price(quote, "sell") or current_price
 
-            logger.info(f"[{self.symbol}] สถานะ HOLDING ต้นทุน {entry_price} THB ราคาปัจจุบัน {current_price} THB")
+            logger.info(
+                f"[{self.symbol}] สถานะ HOLDING ต้นทุน {entry_price} THB "
+                f"last {current_price} THB bid {quote.get('bid') or '-'} offer {quote.get('ask') or '-'}"
+            )
 
             if current_price > highest_price:
                 self.state["highest_price"] = current_price
@@ -1010,19 +1163,19 @@ class InnovestXTradingBot:
             stop_loss_threshold = entry_price * (1 - self.stop_loss_percent / 100)
             breakeven_price = entry_price * (1 + fee_pct / 100)  # breakeven จริงหลังหักค่าธรรมเนียม
 
-            if current_price <= stop_loss_threshold:
+            if sell_mark <= stop_loss_threshold:
                 logger.warning("🚨 ถึงจุด Hard Stop Loss ขายทันทีเพื่อจำกัดความเสียหาย")
-                self.sell_position(qty, current_price)
-            elif has_peaked and current_price <= trailing_threshold:
+                self.sell_position(qty, sell_mark)
+            elif has_peaked and sell_mark <= trailing_threshold:
                 # ขายทันทีที่ราคาย่อลงมาเกิน trailing_stop_percent จากจุดสูงสุด ไม่รอเช็ค breakeven อีกต่อไป
                 # (ของเดิมจะถือต่อถ้ายังไม่คุ้มค่าธรรมเนียม ทำให้บางครั้งไม่ขายเลย)
-                if current_price > breakeven_price:
+                if sell_mark > breakeven_price:
                     logger.info(f"💰 ถึงจุด Trailing Stop ({self.trailing_stop_percent}%) และคุ้มค่าธรรมเนียม "
                                 f"(breakeven {breakeven_price:.2f}) ขายล็อกกำไร")
                 else:
                     logger.warning(f"⚠️ ถึงจุด Trailing Stop ({self.trailing_stop_percent}%) แต่ยังไม่คุ้มค่าธรรมเนียม "
                                    f"(breakeven {breakeven_price:.2f}) — ขายตามคำสั่งใหม่ (ไม่ถือรอแล้ว)")
-                self.sell_position(qty, current_price)
+                self.sell_position(qty, sell_mark)
 
     def sell_position(self, qty, current_price=None):
         _, coin_free, has_pending = self.get_free_balance()
@@ -1701,6 +1854,14 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             chips.append(f'<span class="chip {"up" if change_2h >= 0 else "down"}">2 ชม. {change_2h:+.2f}%</span>')
         if net_2h is not None:
             chips.append(f'<span class="chip {"up" if net_2h >= 0 else "down"}">สุทธิ 2 ชม. {net_2h:+.2f}%</span>')
+        quote = st.get("quote") or {}
+        bid, ask, spread = quote.get("bid"), quote.get("ask"), quote.get("spread_pct")
+        if bid and ask:
+            chips.append(f'<span class="chip">bid {_fmt_thb(bid)} / offer {_fmt_thb(ask)}</span>')
+        if spread is not None:
+            chips.append(
+                f'<span class="chip {"down" if spread > MAX_SPREAD_PERCENT else ""}">สเปรด {spread:.2f}%</span>'
+            )
         if status == "HOLDING":
             sub = f"ต้นทุน {_fmt_thb(float(st.get('entry_price', 0) or 0))} ฿ · ดูแลด้วย trailing / stop loss แบบเดิม"
         elif elapsed and elapsed < 7200:
@@ -1828,7 +1989,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             states = {}
             for sym in visible:
                 try:
-                    states[sym] = db.reference(f"bots/{sym}/state").get() or {}
+                    states[sym] = load_symbol_view(sym)
                 except Exception:
                     states[sym] = {}
             shared_risk = load_shared_risk()
@@ -2239,4 +2400,5 @@ if __name__ == "__main__":
 
     for bot in bots.values():
         bot.save_state()
+        bot.save_market()
     logger.info("บอทหยุดทำงานเรียบร้อย (state ถูกบันทึกแล้ว)")
