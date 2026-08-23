@@ -67,6 +67,10 @@ MIN_CHANGE_1H_PERCENT = 0.5      # ชม.ล่าสุดต้องขึ�
 MIN_NET_2H_PERCENT = 0.7         # สุทธิ 2 ชม. ต้องบวกจริง
 MAX_CHANGE_1H_PERCENT = 2.5      # ชม.ล่าสุดพุ่งเกินนี้ = ไล่หัว ไม่ซื้อ
 HOUR3_VETO_PERCENT = -1.5        # ชม.3 ลงแรงกว่านี้ = ขาลงใหญ่ยังไม่จบ ห้ามซื้อ
+# หมายเหตุ: ค่านี้เป็น "ป้ายกำกับ" มากกว่า threshold ที่ปรับได้จริง — evaluate_entry_signal()
+# บวกคะแนนแบบสะสมทีละขั้น (50+30+20) แล้ว return ทันทีถ้าขั้นไหนไม่ผ่าน ดังนั้นจุดที่โค้ด
+# จะเทียบ confidence >= MIN_CONFIDENCE_TO_BUY มีค่าที่เป็นไปได้แค่ 100 เท่านั้น (ไม่เคยเป็น 80-99)
+# การจะเปลี่ยนพฤติกรรมซื้อจริงๆ ต้องไปแก้เงื่อนไขแต่ละขั้นตรงๆ ไม่ใช่แก้ตัวเลขนี้
 MIN_CONFIDENCE_TO_BUY = 80
 
 
@@ -302,12 +306,15 @@ class InnovestXTradingBot:
     # ---- ค่าคงที่ที่ปรับได้ ----
     MAX_DAILY_LOSS_PERCENT = 5.0        # หยุดเทรดถ้าขาดทุนสะสมวันนี้เกิน % ของทุนเริ่มวัน (ปรับได้จากหน้าเว็บ)
     MAX_CONSECUTIVE_LOSSES = 3          # หยุดเทรดถ้าขาดทุนติดกันกี่ไม้ (ปรับได้จากหน้าเว็บ)
-    DEFAULT_TRADE_SIZE_PERCENT = 95.0   # % ของเงินบาทว่างที่ใช้เข้าซื้อต่อไม้ (ปรับได้จากหน้าเว็บ)
+    DEFAULT_TRADE_SIZE_PERCENT = 95.0   # % ของ "เงินที่แบ่งให้ไม้นี้" ที่จะใช้จริง (หลังหาร slots ว่างแล้ว) — ปรับได้จากหน้าเว็บ
     DEFAULT_MAX_OPEN_POSITIONS = 3      # ถือได้พร้อมกันกี่เหรียญ (ปรับได้จากหน้าเว็บ)
     DEFAULT_TRAILING_STOP_PERCENT = 1.0 # ขึ้นไปแล้วย่อลงจากจุดสูงสุดเกิน % นี้ → ขาย (ปรับได้จากหน้าเว็บ)
     DEFAULT_STOP_LOSS_PERCENT = 3.0     # เข้าซื้อแล้วราคาลงจากต้นทุนเกิน % นี้ → ขายตัดขาดทุนทันที (ปรับได้จากหน้าเว็บ)
     DEFAULT_ROUNDTRIP_FEE_PERCENT = 0.40  # fallback ถ้าดึงค่าธรรมเนียมจริงไม่ได้ — ยึดตามที่ยืนยัน: ทุก 1,000 บาท เก็บไม่เกิน 2 บาทต่อขา (0.2%) รวมไป-กลับ 0.4%
-    MAX_ROUNDTRIP_FEE_PERCENT = 0.40      # เพดานค่าธรรมเนียม กันเคส API คืนค่าผิดเพี้ยนจนดันไปเกินความเป็นจริง (อิงตัวเลขเดียวกับด้านบน)
+    # เพดาน "กันขยะ" กรณี API คืนค่าผิดเพี้ยนจนคำนวณได้สูงเวอร์ (เช่นหน่วยผิด) — ไม่ใช่เพดานค่าธรรมเนียมจริง
+    # ตั้งไว้กว้างกว่า DEFAULT_ROUNDTRIP_FEE_PERCENT มาก เพื่อไม่ให้ไปบีบค่าธรรมเนียมจริงที่สูงกว่า 0.40%
+    # ให้เหลือแค่ 0.40% อย่างผิด ๆ (ซึ่งจะทำให้ breakeven ต่ำกว่าจริง แล้วขายทั้งที่ยังขาดทุนสุทธิอยู่)
+    MAX_ROUNDTRIP_FEE_PERCENT = 2.0
     MIN_ORDER_THB = 100.0
     MAX_ACCEPTABLE_SLIPPAGE_PERCENT = 1.0  # ถ้าราคาจริงเพี้ยนจากที่คาดเกิน % นี้จะแจ้งเตือน
     REQUEST_TIMEOUT_SEC = 10
@@ -613,13 +620,14 @@ class InnovestXTradingBot:
                     buy_fee_pct = (order_fee / total_value) * 100
                     roundtrip_pct = buy_fee_pct * 2  # คูณ 2 เพื่อประมาณการค่าฟีแบบไป-กลับ (ซื้อ + ขาย)
                     if roundtrip_pct > self.MAX_ROUNDTRIP_FEE_PERCENT:
-                        # ค่าที่ API คืนมาสูงเกินความเป็นจริงที่ยืนยันไว้ (ไม่เกิน 2 บาท ต่อการเทรด 1,000 บาท ต่อขา)
-                        # อาจเป็นเพราะ path/พารามิเตอร์ผิด — ตัดเพดานไว้กันไม่ให้ breakeven ถูกดันสูงเกินจริงจนบอทไม่ยอมขาย
+                        # ค่าที่ API คืนมาสูงผิดปกติมาก (เกินเพดานกันขยะ) — น่าจะเป็นเพราะ path/พารามิเตอร์ผิด
+                        # หรือหน่วยเพี้ยน ไม่ใช่ค่าธรรมเนียมจริงที่สมเหตุสมผล จึงใช้ default แทนดีกว่าใช้ค่าที่ผิดเพี้ยน
                         logger.warning(
-                            f"ค่าธรรมเนียมที่คำนวณได้ {roundtrip_pct:.3f}% สูงกว่าเพดานที่ตั้งไว้ "
-                            f"{self.MAX_ROUNDTRIP_FEE_PERCENT}% — ใช้ค่าเพดานแทน (ควรตรวจสอบ FEE_ESTIMATE_PATH)"
+                            f"ค่าธรรมเนียมที่คำนวณได้ {roundtrip_pct:.3f}% สูงผิดปกติเกินเพดานกันขยะ "
+                            f"{self.MAX_ROUNDTRIP_FEE_PERCENT}% — ใช้ default {self.DEFAULT_ROUNDTRIP_FEE_PERCENT}% แทน "
+                            f"(ควรตรวจสอบ FEE_ESTIMATE_PATH)"
                         )
-                        return self.MAX_ROUNDTRIP_FEE_PERCENT
+                        return self.DEFAULT_ROUNDTRIP_FEE_PERCENT
                     return roundtrip_pct
             except (KeyError, TypeError, ValueError) as e:
                 logger.warning(f"เกิดข้อผิดพลาดในการคำนวณค่าธรรมเนียมจริง: {e}")
@@ -833,8 +841,15 @@ class InnovestXTradingBot:
             "reason": signal["reason"],
         }
 
-    def try_enter_position(self, current_price):
-        """เข้าซื้อด้วยกติกาเดิม (ใช้ % เงินว่างต่อไม้) — เรียกเมื่อผ่านเกณฑ์ขาขึ้นแล้วเท่านั้น"""
+    def try_enter_position(self, current_price, available_slots=1):
+        """เข้าซื้อ — ใช้ % ของ 'เงินที่แบ่งให้ไม้นี้' ไม่ใช่ % ของเงินว่างทั้งหมด
+
+        available_slots คือจำนวนช่องว่างที่เหลือ ณ ตอนนี้ (รวมไม้นี้ด้วย) เช่นถือได้สูงสุด 3
+        ช่อง ตอนนี้ว่าง 3 ช่อง → available_slots=3 → เงินที่แบ่งให้ไม้นี้ = เงินว่างทั้งหมด / 3
+        วิธีนี้กันไม่ให้ไม้แรกใช้เงินเกือบหมดจนไม้ถัดไปในเหรียญอื่นไม่มีที่ให้ซื้อ
+        (ของเดิมใช้ % ของเงินว่างทั้งก้อนตรงๆ ถ้าตั้ง trade_size_percent สูงๆ เช่น 95%
+        จะเหลือเงินไม่พอให้เหรียญอื่นซื้อในรอบเดียวกันแทบทุกครั้ง)
+        """
         if self.state["status"] != "IDLE":
             return False
 
@@ -846,8 +861,10 @@ class InnovestXTradingBot:
             logger.info(f"[{self.symbol}] เงินว่างไม่พอสำหรับซื้อขั้นต่ำ (คงเหลือ {thb_free:.2f} THB)")
             return False
 
+        slots = max(1, int(available_slots or 1))
+        allocation = thb_free / slots
         rules = self.get_symbol_rules()
-        buy_value = round(thb_free * (self.trade_size_percent / 100.0), 2)
+        buy_value = round(allocation * (self.trade_size_percent / 100.0), 2)
         order_res = self.execute_market_order(side=0, value=buy_value)
 
         if not (order_res and order_res.get("code") == "0000"):
@@ -881,7 +898,7 @@ class InnovestXTradingBot:
 
         logger.info(
             f"[{self.symbol}] ซื้อสำเร็จ ต้นทุนเฉลี่ย {avg_price} THB จำนวน {estimated_qty} "
-            f"(ค่าธรรมเนียม round-trip โดยประมาณ {fee_pct:.3f}%)"
+            f"(ใช้เงิน {buy_value:.2f} จาก {slots} ช่องว่าง, ค่าธรรมเนียม round-trip โดยประมาณ {fee_pct:.3f}%)"
         )
         return True
 
@@ -907,6 +924,12 @@ class InnovestXTradingBot:
                 highest_price = current_price
                 logger.info(f"🚀 จุดสูงสุดใหม่: {current_price} THB")
 
+            # trailing stop ควรทำงานเฉพาะตอนที่ "เคยขึ้นไปเหนือทุนจริง ๆ" แล้วเท่านั้น
+            # ถ้ายังไม่เคย (highest_price ยัง <= entry_price เพราะราคาไหลลงตรงๆ ตั้งแต่ซื้อ)
+            # ต้องปล่อยให้ stop_loss_percent เป็นตัวตัดสินใจแทน ไม่งั้นถ้า trailing_stop_percent
+            # ตั้งไว้ต่ำกว่า stop_loss_percent (ค่า default 1% < 3%) trailing จะแย่งตัดขาย
+            # ก่อน stop loss ทุกครั้งที่ราคาลง ทำให้ "หยุดขาดทุนสูงสุด" ที่ตั้งไว้ 3% ไม่เคยมีผลจริง
+            has_peaked = highest_price > entry_price
             trailing_threshold = highest_price * (1 - self.trailing_stop_percent / 100)
             stop_loss_threshold = entry_price * (1 - self.stop_loss_percent / 100)
             breakeven_price = entry_price * (1 + fee_pct / 100)  # breakeven จริงหลังหักค่าธรรมเนียม
@@ -914,7 +937,7 @@ class InnovestXTradingBot:
             if current_price <= stop_loss_threshold:
                 logger.warning("🚨 ถึงจุด Hard Stop Loss ขายทันทีเพื่อจำกัดความเสียหาย")
                 self.sell_position(qty, current_price)
-            elif current_price <= trailing_threshold:
+            elif has_peaked and current_price <= trailing_threshold:
                 # ขายทันทีที่ราคาย่อลงมาเกิน trailing_stop_percent จากจุดสูงสุด ไม่รอเช็ค breakeven อีกต่อไป
                 # (ของเดิมจะถือต่อถ้ายังไม่คุ้มค่าธรรมเนียม ทำให้บางครั้งไม่ขายเลย)
                 if current_price > breakeven_price:
@@ -1214,11 +1237,11 @@ ${unlock_button_html}
 <div class="settings-body">
 <div class="control-sub">ปรับค่าไหนก็ได้พร้อมกัน ใส่รหัสครั้งเดียวแล้วกดบันทึกทีเดียว</div>
 
-<div class="control-label" style="font-size:12px; margin-top:16px;">อัตราเงินที่ใช้เข้าซื้อต่อไม้ (% ของเงินว่าง)</div>
+<div class="control-label" style="font-size:12px; margin-top:16px;">อัตราเงินที่ใช้เข้าซื้อต่อไม้ (% ของเงินที่แบ่งให้ไม้นี้)</div>
 <input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="100"
 name="trade_size_percent" value="${trade_size_percent}">
-<div class="control-sub">ถ้าอยากถือ ${max_open_positions} เหรียญพร้อมกัน แนะนำตั้งประมาณ ${suggested_trade_size}%
-ต่อไม้ ไม่งั้นไม้แรกจะกินเงินเกือบหมด</div>
+<div class="control-sub">ระบบแบ่งเงินว่างตามจำนวนช่องว่าง ณ ตอนนั้นให้อัตโนมัติแล้ว (เช่นว่าง 3 ช่อง = แบ่งเงินว่างเป็น 3 ส่วน)
+ค่านี้คือ % ของเงินที่แบ่งให้ไม้นี้เท่านั้นที่จะใช้จริง ไม่ต้องคำนวณเองอีก</div>
 
 <div class="control-label" style="font-size:12px; margin-top:16px;">ถือได้พร้อมกันกี่เหรียญ</div>
 <input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="10"
@@ -1238,7 +1261,7 @@ name="max_daily_loss_percent" value="${max_daily_loss_percent}">
 <div class="control-label" style="font-size:12px; margin-top:16px;">ขึ้นไปแล้วย่อลงจากจุดสูงสุดเกิน (%) → ขาย (Trailing Stop)</div>
 <input class="symbol-input" style="text-transform:none;" type="number" step="0.1" min="0.1" max="20"
 name="trailing_stop_percent" value="${trailing_stop_percent}">
-<div class="control-sub">ถือไม้อยู่แล้วราคาขึ้นทำจุดสูงสุดใหม่ ถ้าย่อลงมาจากจุดสูงสุดเกิน % นี้ จะขายล็อกกำไร/ตัดขาดทุน</div>
+<div class="control-sub">ใช้เฉพาะตอนที่ราคาเคยขึ้นเหนือทุนจริงแล้วเท่านั้น ถ้าซื้อแล้วราคาไม่เคยขึ้นเลย จะใช้ Stop Loss ด้านล่างตัดสินใจแทน</div>
 
 <div class="control-label" style="font-size:12px; margin-top:16px;">เข้าซื้อแล้วราคาลงจากต้นทุนเกิน (%) → ขายตัดขาดทุน (Stop Loss)</div>
 <input class="symbol-input" style="text-transform:none;" type="number" step="0.1" min="0.1" max="50"
@@ -1645,7 +1668,8 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
     last_updated = datetime.now().strftime("%H:%M:%S")
     suggested = max(1, int(round(100.0 / max_open)))
     size_hint_html = (
-        f"หลังขายไม้ใดไม้หนึ่ง ช่องจะว่าง แล้วบอทจะไปมองหาเหรียญอื่นในรายการต่อให้เอง"
+        "ระบบแบ่งเงินตามช่องว่างให้อัตโนมัติแล้ว จะถือกี่เหรียญพร้อมกันก็ปรับตรงนี้ได้เลย "
+        "ไม่ต้องคำนวณอัตราเงินต่อไม้เองอีก"
     )
 
     unlock_button_html = ""
@@ -2103,16 +2127,18 @@ if __name__ == "__main__":
 
                 for bot, px, signal in candidates:
                     holding_count = sum(1 for b in bots.values() if b.state.get("status") == "HOLDING")
-                    if holding_count >= int(control["max_open_positions"]):
+                    remaining_slots = int(control["max_open_positions"]) - holding_count
+                    if remaining_slots <= 0:
                         logger.info("ช่องถือเต็มแล้ว — เหรียญที่เหลือจะรอจนมีช่องว่างหลังขาย")
                         break
                     net_txt = f"{signal.get('net_2h'):+.2f}%" if signal.get("net_2h") is not None else "n/a"
                     logger.info(
                         f"[{bot.symbol}] สัญญาณขาขึ้น คะแนน {signal['confidence']}% "
-                        f"(ชม.1 {signal['change_1h']:+.2f}%, สุทธิ 2ชม. {net_txt}) — พยายามเข้าซื้อ"
+                        f"(ชม.1 {signal['change_1h']:+.2f}%, สุทธิ 2ชม. {net_txt}) — พยายามเข้าซื้อ "
+                        f"(แบ่งเงินจาก {remaining_slots} ช่องว่าง)"
                     )
                     try:
-                        bot.try_enter_position(px)
+                        bot.try_enter_position(px, available_slots=remaining_slots)
                     except Exception:
                         logger.exception(f"[{bot.symbol}] เข้าซื้อล้มเหลว")
                     time.sleep(0.3)
