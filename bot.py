@@ -1113,8 +1113,12 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .control-sub { font-size:12px; color:var(--text-soft); margin-top:5px; line-height:1.5; }
 
   .watch-list { display:flex; flex-direction:column; gap:8px; margin-top:12px; }
-  .watch-row { display:flex; align-items:center; justify-content:space-between; gap:8px;
-    padding:10px 12px; background:var(--bg); border:1px solid var(--border); border-radius:12px; }
+  .watch-row { display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:10px 12px; background:var(--bg); border:1px solid var(--border); border-radius:12px;
+    cursor:pointer; }
+  .watch-row-main { min-width:0; }
+  .watch-row input[type="checkbox"] { width:18px; height:18px; flex-shrink:0; accent-color:var(--red); }
+  .watch-row input[type="checkbox"]:disabled { opacity:.35; }
   .watch-sym { font-size:13px; font-weight:700; letter-spacing:0.03em; }
   .watch-meta { font-size:11px; color:var(--text-soft); margin-top:2px; }
 
@@ -1145,6 +1149,7 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .pause-row { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); cursor:pointer; }
   .pause-row input { width:16px; height:16px; flex-shrink:0; }
   .settings-fold { margin-top:12px; border-top:1px solid var(--border); padding-top:4px; }
+  .settings-fold:first-child { margin-top:0; border-top:none; padding-top:0; }
   .settings-fold > summary { display:flex; align-items:center; gap:8px; cursor:pointer;
     list-style:none; padding:10px 2px; user-select:none; }
   .settings-fold > summary::-webkit-details-marker { display:none; }
@@ -1247,27 +1252,31 @@ ${password_field_html}
 </div>
 </form>
 
-<div class="control-card">
-<div class="control-label">เหรียญที่กำลังเฝ้าอยู่</div>
-<div class="control-sub">กดเอาออกเพื่อเลิกเฝ้า (ถ้าถืออยู่จะรอขายก่อน)</div>
-${watchlist_rows_html}
-</div>
+<form class="control-card" method="POST" action="/control/watchlist">
+<details id="watchlist-panel" class="settings-fold">
+<summary>
+<span class="settings-summary-title">เหรียญที่เฝ้าอยู่</span>
+<span class="settings-preview">${watch_count} เหรียญ</span>
+</summary>
+<div class="settings-body">
+<div class="control-sub">ติ๊กเอาออก แล้วพิมพ์เพิ่มเหรียญใหม่ได้เลย (คั่นด้วยช่องว่างหรือจุลภาคถ้าเพิ่มหลายตัว) กดบันทึกครั้งเดียวจบ</div>
 
-<form class="control-card" method="POST" action="/control/watchlist/add">
-<div class="control-label">เพิ่มเหรียญเข้ารายการเฝ้า</div>
-<div class="control-sub">พิมพ์คู่เหรียญแล้วกดเพิ่ม บอทจะดูทุกตัวในรายการด้วยเกณฑ์ 2 ชม.
-เมื่อขายไม้เก่าแล้ว จะไปมองหาเหรียญถัดไปที่คุณเพิ่มไว้ให้เอง</div>
-<input class="symbol-input" type="text" name="symbol" placeholder="เช่น ETHTHB"
+${watchlist_rows_html}
+
+<div class="control-label" style="font-size:12px; margin-top:16px;">เพิ่มเหรียญ (พิมพ์ได้หลายตัว)</div>
+<input class="symbol-input" type="text" name="add_symbols" id="add-symbols-input" placeholder="เช่น ETHTHB SOLTHB"
 autocapitalize="characters" autocomplete="off">
 <div class="quick-picks">
-<button type="submit" class="pick" name="symbol" value="BTCTHB">BTCTHB</button>
-<button type="submit" class="pick" name="symbol" value="ETHTHB">ETHTHB</button>
-<button type="submit" class="pick" name="symbol" value="XRPTHB">XRPTHB</button>
-<button type="submit" class="pick" name="symbol" value="SOLTHB">SOLTHB</button>
+<span class="pick" onclick="addSymbolPick('BTCTHB')">BTCTHB</span>
+<span class="pick" onclick="addSymbolPick('ETHTHB')">ETHTHB</span>
+<span class="pick" onclick="addSymbolPick('XRPTHB')">XRPTHB</span>
+<span class="pick" onclick="addSymbolPick('SOLTHB')">SOLTHB</span>
 </div>
+</div>
+</details>
 <div class="field-row">
 ${password_field_html}
-<button type="submit" class="btn btn-accent">เพิ่มเหรียญ</button>
+<button type="submit" class="btn btn-accent">บันทึกรายการเหรียญ</button>
 </div>
 </form>
 
@@ -1280,14 +1289,24 @@ ${password_field_html}
   </div>
 <script>
 (function(){
-  var d = document.getElementById("settings-panel");
-  if (!d) return;
-  var key = "sentinel-settings-open";
-  try { if (sessionStorage.getItem(key) === "1") d.open = true; } catch (e) {}
-  d.addEventListener("toggle", function(){
-    try { sessionStorage.setItem(key, d.open ? "1" : "0"); } catch (e) {}
-  });
+  function persistFold(id, key){
+    var d = document.getElementById(id);
+    if (!d) return;
+    try { if (sessionStorage.getItem(key) === "1") d.open = true; } catch (e) {}
+    d.addEventListener("toggle", function(){
+      try { sessionStorage.setItem(key, d.open ? "1" : "0"); } catch (e) {}
+    });
+  }
+  persistFold("settings-panel", "sentinel-settings-open");
+  persistFold("watchlist-panel", "sentinel-watchlist-open");
 })();
+function addSymbolPick(sym){
+  var el = document.getElementById('add-symbols-input');
+  if (!el) return;
+  var parts = el.value.split(/[\\s,]+/).filter(Boolean);
+  if (parts.indexOf(sym) === -1) { parts.push(sym); }
+  el.value = parts.join(' ');
+}
 </script>
 </body>
 </html>""")
@@ -1602,17 +1621,14 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         st = states_by_symbol.get(sym) or {}
         status = st.get("status", "IDLE")
         holding = status == "HOLDING"
-        meta = "ถืออยู่ — ขายก่อนจึงเอาออกได้" if holding else "เฝ้าอยู่ รอสัญญาณขาขึ้น"
+        meta = "ถืออยู่ — ต้องขายก่อนจึงเอาออกได้" if holding else "เฝ้าอยู่ รอสัญญาณขาขึ้น"
         disabled = "disabled" if holding else ""
         watch_rows.append(
-            '<div class="watch-row">'
-            f'<div><div class="watch-sym">{_display_symbol(sym)}</div>'
+            '<label class="watch-row">'
+            f'<div class="watch-row-main"><div class="watch-sym">{_display_symbol(sym)}</div>'
             f'<div class="watch-meta">{meta}</div></div>'
-            f'<form method="POST" action="/control/watchlist/remove">'
-            f'<input type="hidden" name="symbol" value="{sym}">'
-            f"{password_field_html}"
-            f'<button type="submit" class="btn btn-sm btn-neutral" {disabled}>เอาออก</button>'
-            "</form></div>"
+            f'<input type="checkbox" name="remove_symbols" value="{sym}" {disabled}>'
+            "</label>"
         )
     if not watchlist:
         watch_rows.append('<div class="watch-meta">ยังว่าง — เพิ่มเหรียญด้านล่าง</div>')
@@ -1806,32 +1822,36 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 save_control(control)
                 logger.info(f"[เว็บควบคุม] บันทึกการตั้งค่า: {', '.join(changes)}")
 
-            elif self.path in ("/control/symbol", "/control/watchlist/add"):
-                requested = ""
-                for item in fields.get("symbol", []):
+            elif self.path == "/control/watchlist":
+                control = load_control()
+                watchlist = list(control.get("watchlist") or [])
+
+                remove_set = set()
+                for item in fields.get("remove_symbols", []):
                     item = item.strip().upper()
                     if item:
-                        requested = item
-                if SYMBOL_RE.match(requested):
-                    control = load_control()
-                    watchlist = list(control.get("watchlist") or [])
-                    if requested not in watchlist:
-                        watchlist.append(requested)
-                        control["watchlist"] = watchlist
-                        save_control(control)
-                        logger.info(f"[เว็บควบคุม] เพิ่มเหรียญเข้าสู่รายการเฝ้า: {requested} ตอนนี้เฝ้า {watchlist}")
-                    else:
-                        logger.info(f"[เว็บควบคุม] {requested} อยู่ในรายการอยู่แล้ว")
-                else:
-                    logger.warning(f"[เว็บควบคุม] ปฏิเสธเหรียญ: รูปแบบไม่ถูกต้อง ({requested})")
+                        remove_set.add(item)
+                new_watchlist = [s for s in watchlist if s not in remove_set]
 
-            elif self.path == "/control/watchlist/remove":
-                requested = fields.get("symbol", [""])[0].strip().upper()
-                control = load_control()
-                watchlist = [s for s in (control.get("watchlist") or []) if s != requested]
-                control["watchlist"] = watchlist
+                raw_add = fields.get("add_symbols", [""])[0]
+                added = []
+                for item in re.split(r"[\s,]+", raw_add.strip()):
+                    item = item.strip().upper()
+                    if not item:
+                        continue
+                    if not SYMBOL_RE.match(item):
+                        logger.warning(f"[เว็บควบคุม] ปฏิเสธเหรียญ: รูปแบบไม่ถูกต้อง ({item})")
+                        continue
+                    if item not in new_watchlist and item not in added:
+                        added.append(item)
+                new_watchlist.extend(added)
+
+                control["watchlist"] = new_watchlist
                 save_control(control)
-                logger.info(f"[เว็บควบคุม] ขอเอา {requested} ออกจากรายการเฝ้า เหลือ {watchlist}")
+                logger.info(
+                    f"[เว็บควบคุม] บันทึกรายการเหรียญ: เอาออก {sorted(remove_set) or '-'} "
+                    f"เพิ่ม {added or '-'} ตอนนี้เฝ้า {new_watchlist}"
+                )
 
             elif self.path == "/control/unlock":
                 control = load_control()
