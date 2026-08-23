@@ -125,6 +125,20 @@ def load_control():
     if not (1 <= max_open_positions <= 10):
         max_open_positions = InnovestXTradingBot.DEFAULT_MAX_OPEN_POSITIONS
 
+    try:
+        trailing_stop_percent = float(data.get("trailing_stop_percent", InnovestXTradingBot.DEFAULT_TRAILING_STOP_PERCENT))
+    except (TypeError, ValueError):
+        trailing_stop_percent = InnovestXTradingBot.DEFAULT_TRAILING_STOP_PERCENT
+    if not (0.1 <= trailing_stop_percent <= 20):
+        trailing_stop_percent = InnovestXTradingBot.DEFAULT_TRAILING_STOP_PERCENT
+
+    try:
+        stop_loss_percent = float(data.get("stop_loss_percent", InnovestXTradingBot.DEFAULT_STOP_LOSS_PERCENT))
+    except (TypeError, ValueError):
+        stop_loss_percent = InnovestXTradingBot.DEFAULT_STOP_LOSS_PERCENT
+    if not (0.1 <= stop_loss_percent <= 50):
+        stop_loss_percent = InnovestXTradingBot.DEFAULT_STOP_LOSS_PERCENT
+
     fallback_symbol = _normalize_symbol(data.get("active_symbol") or DEFAULT_SYMBOL)
     watchlist = _normalize_watchlist(data.get("watchlist"), fallback_symbol)
 
@@ -136,6 +150,8 @@ def load_control():
         "trade_size_percent": trade_size_percent,
         "max_consecutive_losses": max_consecutive_losses,
         "max_open_positions": max_open_positions,
+        "trailing_stop_percent": trailing_stop_percent,
+        "stop_loss_percent": stop_loss_percent,
         "unlock_requested": bool(data.get("unlock_requested", False)),
     }
 
@@ -180,6 +196,8 @@ class InnovestXTradingBot:
     MAX_CONSECUTIVE_LOSSES = 3          # หยุดเทรดถ้าขาดทุนติดกันกี่ไม้ (ปรับได้จากหน้าเว็บ)
     DEFAULT_TRADE_SIZE_PERCENT = 95.0   # % ของเงินบาทว่างที่ใช้เข้าซื้อต่อไม้ (ปรับได้จากหน้าเว็บ)
     DEFAULT_MAX_OPEN_POSITIONS = 3      # ถือได้พร้อมกันกี่เหรียญ (ปรับได้จากหน้าเว็บ)
+    DEFAULT_TRAILING_STOP_PERCENT = 1.0 # ขึ้นไปแล้วย่อลงจากจุดสูงสุดเกิน % นี้ → ขาย (ปรับได้จากหน้าเว็บ)
+    DEFAULT_STOP_LOSS_PERCENT = 3.0     # เข้าซื้อแล้วราคาลงจากต้นทุนเกิน % นี้ → ขายตัดขาดทุนทันที (ปรับได้จากหน้าเว็บ)
     DEFAULT_ROUNDTRIP_FEE_PERCENT = 0.40  # fallback ถ้าดึงค่าธรรมเนียมจริงไม่ได้ — ยึดตามที่ยืนยัน: ทุก 1,000 บาท เก็บไม่เกิน 2 บาทต่อขา (0.2%) รวมไป-กลับ 0.4%
     MAX_ROUNDTRIP_FEE_PERCENT = 0.40      # เพดานค่าธรรมเนียม กันเคส API คืนค่าผิดเพี้ยนจนดันไปเกินความเป็นจริง (อิงตัวเลขเดียวกับด้านบน)
     MIN_ORDER_THB = 100.0
@@ -190,7 +208,11 @@ class InnovestXTradingBot:
     RECONCILE_INTERVAL_SEC = 300  # เช็ค state กับพอร์ตจริงซ้ำทุกกี่วิระหว่างบอทรันอยู่ (นอกเหนือจากตอน startup) — กันเคสขายเหรียญนอกบอทระหว่างที่บอทยังรันค้างอยู่
 
     def __init__(self, api_key, api_secret, symbol="BTCTHB", base_currency="THB",
-                 target_currency=None, trailing_stop_percent=1.0, stop_loss_percent=3):
+                 target_currency=None, trailing_stop_percent=None, stop_loss_percent=None):
+        if trailing_stop_percent is None:
+            trailing_stop_percent = self.DEFAULT_TRAILING_STOP_PERCENT
+        if stop_loss_percent is None:
+            stop_loss_percent = self.DEFAULT_STOP_LOSS_PERCENT
         self.api_key = api_key
         self.api_secret = api_secret
         self.symbol = symbol
@@ -1086,17 +1108,32 @@ name="max_consecutive_losses" value="${max_consecutive_losses}">
 name="max_daily_loss_percent" value="${max_daily_loss_percent}">
 <div class="control-sub">ถ้าขาดทุนสะสมวันนี้ถึง % นี้ บอทจะหยุดเปิดไม้ใหม่ (โพซิชันที่ถืออยู่ยังถูกดูแลต่อ)</div>
 
+<div class="control-label" style="font-size:12px; margin-top:16px;">ขึ้นไปแล้วย่อลงจากจุดสูงสุดเกิน (%) → ขาย (Trailing Stop)</div>
+<input class="symbol-input" style="text-transform:none;" type="number" step="0.1" min="0.1" max="20"
+name="trailing_stop_percent" value="${trailing_stop_percent}">
+<div class="control-sub">ถือไม้อยู่แล้วราคาขึ้นทำจุดสูงสุดใหม่ ถ้าย่อลงมาจากจุดสูงสุดเกิน % นี้ จะขายล็อกกำไร/ตัดขาดทุน</div>
+
+<div class="control-label" style="font-size:12px; margin-top:16px;">เข้าซื้อแล้วราคาลงจากต้นทุนเกิน (%) → ขายตัดขาดทุน (Stop Loss)</div>
+<input class="symbol-input" style="text-transform:none;" type="number" step="0.1" min="0.1" max="50"
+name="stop_loss_percent" value="${stop_loss_percent}">
+<div class="control-sub">เข้าซื้อแล้วราคาไม่ขึ้น ร่วงจากราคาต้นทุนเกิน % นี้ จะขายทันทีเพื่อจำกัดความเสียหาย</div>
+
 <div class="field-row">
 ${password_field_html}
 <button type="submit" class="btn btn-accent">บันทึกการตั้งค่าทั้งหมด</button>
 </div>
 </form>
 
+<div class="control-card">
+<div class="control-label">เหรียญที่กำลังเฝ้าอยู่</div>
+<div class="control-sub">กดเอาออกเพื่อเลิกเฝ้า (ถ้าถืออยู่จะรอขายก่อน)</div>
+${watchlist_rows_html}
+</div>
+
 <form class="control-card" method="POST" action="/control/watchlist/add">
-<div class="control-label">เหรียญที่ให้บอทเฝ้า</div>
+<div class="control-label">เพิ่มเหรียญเข้ารายการเฝ้า</div>
 <div class="control-sub">พิมพ์คู่เหรียญแล้วกดเพิ่ม บอทจะดูทุกตัวในรายการด้วยเกณฑ์ขาขึ้น/ลงแบบเดิม
 เมื่อขายไม้เก่าแล้ว จะไปมองหาเหรียญถัดไปที่คุณเพิ่มไว้ให้เอง</div>
-${watchlist_rows_html}
 <input class="symbol-input" type="text" name="symbol" placeholder="เช่น ETHTHB"
 autocapitalize="characters" autocomplete="off">
 <div class="quick-picks">
@@ -1459,6 +1496,8 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         max_daily_loss_percent=control.get("max_daily_loss_percent", InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT),
         trade_size_percent=control.get("trade_size_percent", InnovestXTradingBot.DEFAULT_TRADE_SIZE_PERCENT),
         max_consecutive_losses=active_max_consecutive_losses,
+        trailing_stop_percent=control.get("trailing_stop_percent", InnovestXTradingBot.DEFAULT_TRAILING_STOP_PERCENT),
+        stop_loss_percent=control.get("stop_loss_percent", InnovestXTradingBot.DEFAULT_STOP_LOSS_PERCENT),
         password_field_html=password_field_html,
         last_updated=last_updated,
     )
@@ -1573,6 +1612,28 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 else:
                     logger.warning(f"[เว็บควบคุม] ปฏิเสธค่าขาดทุนสูงสุดต่อวัน: '{raw_value}' (ต้องอยู่ระหว่าง 0.1-100)")
 
+                raw_value = fields.get("trailing_stop_percent", [""])[0].strip()
+                try:
+                    value = float(raw_value)
+                except ValueError:
+                    value = None
+                if value is not None and 0.1 <= value <= 20:
+                    control["trailing_stop_percent"] = value
+                    changes.append(f"trailing_stop_percent={value}%")
+                else:
+                    logger.warning(f"[เว็บควบคุม] ปฏิเสธค่า Trailing Stop: '{raw_value}' (ต้องอยู่ระหว่าง 0.1-20)")
+
+                raw_value = fields.get("stop_loss_percent", [""])[0].strip()
+                try:
+                    value = float(raw_value)
+                except ValueError:
+                    value = None
+                if value is not None and 0.1 <= value <= 50:
+                    control["stop_loss_percent"] = value
+                    changes.append(f"stop_loss_percent={value}%")
+                else:
+                    logger.warning(f"[เว็บควบคุม] ปฏิเสธค่า Stop Loss: '{raw_value}' (ต้องอยู่ระหว่าง 0.1-50)")
+
                 save_control(control)
                 logger.info(f"[เว็บควบคุม] บันทึกการตั้งค่า: {', '.join(changes)}")
 
@@ -1644,6 +1705,18 @@ def _sync_bot_settings(bot, control):
             f"เป็น {control['max_consecutive_losses']} ไม้ (สั่งจากหน้าเว็บ)"
         )
         bot.max_consecutive_losses = control["max_consecutive_losses"]
+    if bot.trailing_stop_percent != control["trailing_stop_percent"]:
+        logger.info(
+            f"[{bot.symbol}] ปรับ Trailing Stop จาก {bot.trailing_stop_percent}% "
+            f"เป็น {control['trailing_stop_percent']}% (สั่งจากหน้าเว็บ)"
+        )
+        bot.trailing_stop_percent = control["trailing_stop_percent"]
+    if bot.stop_loss_percent != control["stop_loss_percent"]:
+        logger.info(
+            f"[{bot.symbol}] ปรับ Stop Loss จาก {bot.stop_loss_percent}% "
+            f"เป็น {control['stop_loss_percent']}% (สั่งจากหน้าเว็บ)"
+        )
+        bot.stop_loss_percent = control["stop_loss_percent"]
 
 
 def maybe_reset_shared_daily(bots):
@@ -1711,7 +1784,11 @@ if __name__ == "__main__":
     def get_or_create_bot(symbol):
         if symbol not in bots:
             logger.info(f"เริ่มเฝ้าเหรียญ {symbol}")
-            bot = InnovestXTradingBot(api_key=api_key, api_secret=api_secret, symbol=symbol, stop_loss_percent=3.0)
+            bot = InnovestXTradingBot(
+                api_key=api_key, api_secret=api_secret, symbol=symbol,
+                trailing_stop_percent=control["trailing_stop_percent"],
+                stop_loss_percent=control["stop_loss_percent"],
+            )
             bot.max_daily_loss_percent = control["max_daily_loss_percent"]
             bot.trade_size_percent = control["trade_size_percent"]
             bot.max_consecutive_losses = control["max_consecutive_losses"]
