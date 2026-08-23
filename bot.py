@@ -1137,7 +1137,7 @@ def render_dashboard(running_symbol, state, control):
 
     password_field_html = ""
     if os.environ.get("DASHBOARD_PASSWORD"):
-        password_field_html = '<input class="password-input" type="password" name="password" placeholder="รหัสผ่านหน้าควบคุม" style="margin-top:8px;">'
+        password_field_html = '<input class="password-input" type="password" name="password" placeholder="รหัส" style="margin-top:8px;">'
 
     last_updated = datetime.now().strftime("%H:%M:%S")
 
