@@ -180,7 +180,8 @@ class InnovestXTradingBot:
     MAX_CONSECUTIVE_LOSSES = 3          # หยุดเทรดถ้าขาดทุนติดกันกี่ไม้ (ปรับได้จากหน้าเว็บ)
     DEFAULT_TRADE_SIZE_PERCENT = 95.0   # % ของเงินบาทว่างที่ใช้เข้าซื้อต่อไม้ (ปรับได้จากหน้าเว็บ)
     DEFAULT_MAX_OPEN_POSITIONS = 3      # ถือได้พร้อมกันกี่เหรียญ (ปรับได้จากหน้าเว็บ)
-    DEFAULT_ROUNDTRIP_FEE_PERCENT = 0.50  # fallback ถ้าดึงค่าธรรมเนียมจริงไม่ได้ (ปรับให้ตรงจริง!)
+    DEFAULT_ROUNDTRIP_FEE_PERCENT = 0.40  # fallback ถ้าดึงค่าธรรมเนียมจริงไม่ได้ — ยึดตามที่ยืนยัน: ทุก 1,000 บาท เก็บไม่เกิน 2 บาทต่อขา (0.2%) รวมไป-กลับ 0.4%
+    MAX_ROUNDTRIP_FEE_PERCENT = 0.40      # เพดานค่าธรรมเนียม กันเคส API คืนค่าผิดเพี้ยนจนดันไปเกินความเป็นจริง (อิงตัวเลขเดียวกับด้านบน)
     MIN_ORDER_THB = 100.0
     MAX_ACCEPTABLE_SLIPPAGE_PERCENT = 1.0  # ถ้าราคาจริงเพี้ยนจากที่คาดเกิน % นี้จะแจ้งเตือน
     REQUEST_TIMEOUT_SEC = 10
@@ -189,7 +190,7 @@ class InnovestXTradingBot:
     RECONCILE_INTERVAL_SEC = 300  # เช็ค state กับพอร์ตจริงซ้ำทุกกี่วิระหว่างบอทรันอยู่ (นอกเหนือจากตอน startup) — กันเคสขายเหรียญนอกบอทระหว่างที่บอทยังรันค้างอยู่
 
     def __init__(self, api_key, api_secret, symbol="BTCTHB", base_currency="THB",
-                 target_currency=None, trailing_stop_percent=2.0, stop_loss_percent=3):
+                 target_currency=None, trailing_stop_percent=1.0, stop_loss_percent=3):
         self.api_key = api_key
         self.api_secret = api_secret
         self.symbol = symbol
@@ -497,7 +498,16 @@ class InnovestXTradingBot:
                 order_fee = float(order_fee_str)
                 if order_fee > 0 and total_value > 0:
                     buy_fee_pct = (order_fee / total_value) * 100
-                    return buy_fee_pct * 2  # คูณ 2 เพื่อประมาณการค่าฟีแบบไป-กลับ (ซื้อ + ขาย)
+                    roundtrip_pct = buy_fee_pct * 2  # คูณ 2 เพื่อประมาณการค่าฟีแบบไป-กลับ (ซื้อ + ขาย)
+                    if roundtrip_pct > self.MAX_ROUNDTRIP_FEE_PERCENT:
+                        # ค่าที่ API คืนมาสูงเกินความเป็นจริงที่ยืนยันไว้ (ไม่เกิน 2 บาท ต่อการเทรด 1,000 บาท ต่อขา)
+                        # อาจเป็นเพราะ path/พารามิเตอร์ผิด — ตัดเพดานไว้กันไม่ให้ breakeven ถูกดันสูงเกินจริงจนบอทไม่ยอมขาย
+                        logger.warning(
+                            f"ค่าธรรมเนียมที่คำนวณได้ {roundtrip_pct:.3f}% สูงกว่าเพดานที่ตั้งไว้ "
+                            f"{self.MAX_ROUNDTRIP_FEE_PERCENT}% — ใช้ค่าเพดานแทน (ควรตรวจสอบ FEE_ESTIMATE_PATH)"
+                        )
+                        return self.MAX_ROUNDTRIP_FEE_PERCENT
+                    return roundtrip_pct
             except (KeyError, TypeError, ValueError) as e:
                 logger.warning(f"เกิดข้อผิดพลาดในการคำนวณค่าธรรมเนียมจริง: {e}")
 
@@ -779,12 +789,16 @@ class InnovestXTradingBot:
             if current_price <= stop_loss_threshold:
                 logger.warning("🚨 ถึงจุด Hard Stop Loss ขายทันทีเพื่อจำกัดความเสียหาย")
                 self.sell_position(qty, current_price)
-            elif current_price <= trailing_threshold and current_price > breakeven_price:
-                logger.info(f"💰 ถึงจุด Trailing Stop และยังคุ้มค่าธรรมเนียม (breakeven {breakeven_price:.2f}) ขายล็อกกำไร")
-                self.sell_position(qty, current_price)
             elif current_price <= trailing_threshold:
-                logger.info(f"⏸ ราคาย่อถึง trailing threshold แต่ยังไม่คุ้มค่าธรรมเนียม "
-                            f"(breakeven {breakeven_price:.2f}) ถือต่อ")
+                # ขายทันทีที่ราคาย่อลงมาเกิน trailing_stop_percent จากจุดสูงสุด ไม่รอเช็ค breakeven อีกต่อไป
+                # (ของเดิมจะถือต่อถ้ายังไม่คุ้มค่าธรรมเนียม ทำให้บางครั้งไม่ขายเลย)
+                if current_price > breakeven_price:
+                    logger.info(f"💰 ถึงจุด Trailing Stop ({self.trailing_stop_percent}%) และคุ้มค่าธรรมเนียม "
+                                f"(breakeven {breakeven_price:.2f}) ขายล็อกกำไร")
+                else:
+                    logger.warning(f"⚠️ ถึงจุด Trailing Stop ({self.trailing_stop_percent}%) แต่ยังไม่คุ้มค่าธรรมเนียม "
+                                   f"(breakeven {breakeven_price:.2f}) — ขายตามคำสั่งใหม่ (ไม่ถือรอแล้ว)")
+                self.sell_position(qty, current_price)
 
     def sell_position(self, qty, current_price=None):
         _, coin_free, has_pending = self.get_free_balance()
