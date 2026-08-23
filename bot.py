@@ -1,12 +1,12 @@
 """
-InnovestX Automated Trading Bot — Price Action 3H Strategy
-(v5, เฝ้าหลายเหรียญจากหน้าเว็บ + ถือได้พร้อมกันหลายตัว)
+InnovestX Automated Trading Bot — Price Action 2H Strategy
+(v6, เข้าซื้อด้วย 2 ชม.เป็นหลัก / ชม.3 ห้ามซื้อถ้าลงแรง)
 
 ของใหม่ในเวอร์ชันนี้:
-1. เพิ่ม/ลบเหรียญที่ให้บอทเฝ้าได้จากหน้าเว็บ (watchlist) ไม่จำกัดแค่เหรียญเดียว
-2. บอทดูทุกเหรียญในรายการด้วยเกณฑ์ขาขึ้น/ลงแบบเดิม (Price Action 3H, ยืนยัน 50%)
-3. เข้าซื้อเหรียญที่เป็นขาขึ้นเมื่อยังมีช่องว่าง — ขายแล้วมองหาเหรียญถัดไปในรายการทันที
-4. ตั้งจำนวนเหรียญสูงสุดที่ถือพร้อมกันได้จากหน้าเว็บ
+1. สูตรเข้าซื้อใช้ 2 ชั่วโมงเป็นหลัก (ชม.1 + ชม.2 ต้องขึ้น, สุทธิ 2 ชม. ต้องบวก)
+2. ชม.ที่ 3 ไม่ยืนยันซื้อแล้ว — ใช้แค่ห้ามซื้อถ้าลงแรงเกิน −1.5%
+3. การ์ดตั้งค่าบอทพับได้ เหลือแถวสรุปตอนหุบ
+4. แดชบอร์ดใช้สูตรเดียวกับบอท
 
 ของเดิมยังอยู่ครบ: แดชบอร์ด, หยุด/เริ่มเทรด, รหัสผ่าน, % ขาดทุนต่อวัน, อัตราเงินต่อไม้,
 จำนวนไม้ขาดทุนติดกัน, price_history ต่อเหรียญ, ค่าธรรมเนียม, circuit breaker, Decimal, graceful shutdown
@@ -62,8 +62,116 @@ RUNNING_WATCHLIST = {"value": [DEFAULT_SYMBOL]}
 STOP_ALL = {"value": False}
 SHARED_RISK_PATH = "bots/_shared/risk"
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}$")
-# เกณฑ์เดิม: ต้องมี 2ชม. หรือ 3ชม. ยืนยันทิศทางเดียวกันอย่างน้อย 1 ใน 2
-MIN_CONFIDENCE_TO_BUY = 50
+# เข้าซื้อด้วย 2 ชม.เป็นหลัก — ชม.3 ใช้แค่ห้ามซื้อ ไม่เอามายืนยัน
+MIN_CHANGE_1H_PERCENT = 0.5      # ชม.ล่าสุดต้องขึ้นอย่างน้อยเท่านี้ (สูงกว่าค่าฟี ~0.4%)
+MIN_NET_2H_PERCENT = 0.7         # สุทธิ 2 ชม. ต้องบวกจริง
+MAX_CHANGE_1H_PERCENT = 2.5      # ชม.ล่าสุดพุ่งเกินนี้ = ไล่หัว ไม่ซื้อ
+HOUR3_VETO_PERCENT = -1.5        # ชม.3 ลงแรงกว่านี้ = ขาลงใหญ่ยังไม่จบ ห้ามซื้อ
+MIN_CONFIDENCE_TO_BUY = 80
+
+
+def _pct_change(newer, older):
+    if newer is None or older is None or older == 0:
+        return None
+    return (newer - older) / older * 100
+
+
+def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ago=None):
+    """ตัดสินใจซื้อด้วย 2 ชม.เป็นหลัก ชม.3 ใช้แค่ห้ามซื้อถ้าลงแรง
+
+    คะแนน: ชม.1 ขึ้นพอ +50, ชม.2 ขึ้น +30, สุทธิ 2 ชม.พอ +20
+    ชม.2 ลง / ชม.1 อ่อน / สุทธิไม่พอ / ไล่หัว / ชม.3 ลงแรง → ไม่ซื้อ (ไม่บวกคะแนนจากชม.3)
+    """
+    result = {
+        "direction": None,
+        "confidence": 0,
+        "should_buy": False,
+        "reason": "unknown",
+        "change_1h": 0.0,
+        "change_2h": None,
+        "change_3h": None,
+        "net_2h": None,
+        "vetoed": False,
+    }
+    if current_price is None or price_1h_ago is None or price_1h_ago == 0:
+        result["reason"] = "no_price"
+        return result
+
+    change_1h = _pct_change(current_price, price_1h_ago)
+    change_2h = _pct_change(price_1h_ago, price_2h_ago)
+    change_3h = _pct_change(price_2h_ago, price_3h_ago)
+    net_2h = _pct_change(current_price, price_2h_ago)
+    result["change_1h"] = change_1h or 0.0
+    result["change_2h"] = change_2h
+    result["change_3h"] = change_3h
+    result["net_2h"] = net_2h
+
+    if change_1h is None or change_1h == 0:
+        result["reason"] = "flat"
+        return result
+
+    direction = "up" if change_1h > 0 else "down"
+    result["direction"] = direction
+    if direction == "down":
+        result["reason"] = "down"
+        return result
+
+    if price_2h_ago is None:
+        result["reason"] = "gap"
+        return result
+
+    confidence = 0
+    if change_1h < MIN_CHANGE_1H_PERCENT:
+        result["reason"] = "weak_1h"
+        return result
+    confidence += 50
+
+    if change_1h > MAX_CHANGE_1H_PERCENT:
+        result["confidence"] = confidence
+        result["reason"] = "chase"
+        return result
+
+    if change_2h is None:
+        result["reason"] = "gap"
+        return result
+    if change_2h <= 0:
+        result["confidence"] = max(0, confidence - 40)
+        result["reason"] = "hour2_down"
+        return result
+    confidence += 30
+
+    if net_2h is None or net_2h < MIN_NET_2H_PERCENT:
+        result["confidence"] = confidence
+        result["reason"] = "weak_net"
+        return result
+    confidence += 20
+
+    if change_3h is not None and change_3h < HOUR3_VETO_PERCENT:
+        result["confidence"] = confidence
+        result["vetoed"] = True
+        result["reason"] = "hour3_veto"
+        return result
+
+    result["confidence"] = confidence
+    result["should_buy"] = confidence >= MIN_CONFIDENCE_TO_BUY
+    result["reason"] = None if result["should_buy"] else "weak"
+    return result
+
+
+REASON_TH = {
+    "no_price": "ยังไม่มีราคา",
+    "flat": "ราคานิ่ง",
+    "down": "ชม.ล่าสุดลง — ไม่ซื้อ",
+    "gap": "ข้อมูลราคาขาดช่วง",
+    "weak_1h": f"ชม.ล่าสุดขึ้นไม่ถึง {MIN_CHANGE_1H_PERCENT}%",
+    "chase": f"ชม.ล่าสุดพุ่งเกิน {MAX_CHANGE_1H_PERCENT}% — กันไล่หัว",
+    "hour2_down": "ชม.ก่อนหน้าลง — หักลบแล้วไม่ซื้อ",
+    "weak_net": f"สุทธิ 2 ชม. ยังไม่ถึง +{MIN_NET_2H_PERCENT}%",
+    "hour3_veto": f"ชม.3 ลงแรงกว่า {HOUR3_VETO_PERCENT}% — ห้ามซื้อ",
+    "weak": "คะแนนยังไม่ถึงเกณฑ์",
+    "waiting_history": "รอสะสมข้อมูล 2 ชั่วโมง",
+    "unknown": "ยังประเมินไม่ได้",
+}
 
 
 def _normalize_symbol(raw):
@@ -448,26 +556,9 @@ class InnovestXTradingBot:
         return (time.time() - history[0][0]) >= 7200  # อย่างน้อย 2 ชั่วโมง
 
     def _trend_confidence(self, current_price, price_1h_ago, price_2h_ago, price_3h_ago):
-        """ทิศทางหลักดูจาก 1ชม.ล่าสุด แล้วให้คะแนนความมั่นใจเพิ่มจาก 2ชม./3ชม.ก่อนหน้า (50% ต่อชม.)"""
-        if current_price is None or price_1h_ago is None or current_price == price_1h_ago:
-            return None, 0
-
-        direction = "up" if current_price > price_1h_ago else "down"
-        confidence = 0
-
-        if price_1h_ago is not None and price_2h_ago is not None:
-            hour2_same_direction = (direction == "up" and price_1h_ago > price_2h_ago) or \
-                                    (direction == "down" and price_1h_ago < price_2h_ago)
-            if hour2_same_direction:
-                confidence += 50
-
-        if price_2h_ago is not None and price_3h_ago is not None:
-            hour3_same_direction = (direction == "up" and price_2h_ago > price_3h_ago) or \
-                                    (direction == "down" and price_2h_ago < price_3h_ago)
-            if hour3_same_direction:
-                confidence += 50
-
-        return direction, confidence
+        """wrapper ไว้ให้โค้ดเก่าที่เรียกอยู่ — สูตรจริงอยู่ที่ evaluate_entry_signal()"""
+        signal = evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
+        return signal["direction"], signal["confidence"]
 
     def get_symbol_rules(self):
         products_res = self.send_request("GET", "/api/v1/digital-asset/products")
@@ -683,13 +774,17 @@ class InnovestXTradingBot:
 
     # ==================== Strategy ====================
     def analyze_trend(self, current_price):
-        """ประเมินขาขึ้น/ลงด้วยเกณฑ์เดิม (Price Action 3H) — ยังไม่ซื้อ แค่ให้คะแนน"""
+        """ประเมินขาขึ้น/ลงด้วย Price Action 2H — ชม.3 ใช้แค่ห้ามซื้อ"""
         empty = {
             "ready": False,
             "should_buy": False,
             "direction": None,
             "confidence": 0,
             "change_1h": 0.0,
+            "change_2h": None,
+            "change_3h": None,
+            "net_2h": None,
+            "vetoed": False,
             "reason": "unknown",
         }
         if current_price is None:
@@ -705,29 +800,37 @@ class InnovestXTradingBot:
         price_2h_ago = self._price_at_offset(7200)
         price_3h_ago = self._price_at_offset(10800)
 
-        if price_1h_ago is None:
+        if price_1h_ago is None or price_2h_ago is None:
             logger.info(f"[{self.symbol}] ข้อมูลราคาบางช่วงขาดหาย (gap) รอรอบถัดไป")
             empty["reason"] = "gap"
             return empty
 
-        direction, confidence = self._trend_confidence(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
-        change_1h = ((current_price - price_1h_ago) / price_1h_ago * 100) if price_1h_ago else 0.0
-        should_buy = direction == "up" and confidence >= MIN_CONFIDENCE_TO_BUY
+        signal = evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
+        reason_th = REASON_TH.get(signal["reason"], signal["reason"] or "พร้อมซื้อ")
+        net_txt = f"{signal['net_2h']:+.2f}%" if signal["net_2h"] is not None else "n/a"
+        h2_txt = f"{signal['change_2h']:+.2f}%" if signal["change_2h"] is not None else "n/a"
 
         logger.info(
-            f"[{self.symbol}] ทิศทาง 1ชม: {direction or 'flat'} "
-            f"(ยืนยัน {confidence}%) เปลี่ยน {change_1h:+.2f}%"
+            f"[{self.symbol}] ทิศทาง: {signal['direction'] or 'flat'} "
+            f"(คะแนน {signal['confidence']}%) ชม.1 {signal['change_1h']:+.2f}% "
+            f"ชม.2 {h2_txt} สุทธิ 2ชม. {net_txt}"
         )
-        if direction == "down":
-            logger.info(f"[{self.symbol}] เห็นสัญญาณขาลง (ยืนยัน {confidence}%) — ไม่เข้าซื้อ")
+        if signal["should_buy"]:
+            logger.info(f"[{self.symbol}] ผ่านเกณฑ์เข้าซื้อ")
+        else:
+            logger.info(f"[{self.symbol}] ไม่เข้าซื้อ — {reason_th}")
 
         return {
             "ready": True,
-            "should_buy": should_buy,
-            "direction": direction,
-            "confidence": confidence,
-            "change_1h": change_1h,
-            "reason": None if should_buy else ("down" if direction == "down" else "weak"),
+            "should_buy": signal["should_buy"],
+            "direction": signal["direction"],
+            "confidence": signal["confidence"],
+            "change_1h": signal["change_1h"],
+            "change_2h": signal["change_2h"],
+            "change_3h": signal["change_3h"],
+            "net_2h": signal["net_2h"],
+            "vetoed": signal["vetoed"],
+            "reason": signal["reason"],
         }
 
     def try_enter_position(self, current_price):
@@ -1039,6 +1142,21 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .btn-danger { background:var(--red); color:#fff; }
   .btn-sm { padding:8px 12px; font-size:12px; }
 
+  .pause-row { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text); cursor:pointer; }
+  .pause-row input { width:16px; height:16px; flex-shrink:0; }
+  .settings-fold { margin-top:12px; border-top:1px solid var(--border); padding-top:4px; }
+  .settings-fold > summary { display:flex; align-items:center; gap:8px; cursor:pointer;
+    list-style:none; padding:10px 2px; user-select:none; }
+  .settings-fold > summary::-webkit-details-marker { display:none; }
+  .settings-fold > summary::after { content:""; width:7px; height:7px; margin-left:auto;
+    border-right:2px solid var(--text-soft); border-bottom:2px solid var(--text-soft);
+    transform:rotate(45deg); flex-shrink:0; transition:transform .15s ease; }
+  .settings-fold[open] > summary::after { transform:rotate(-135deg); margin-top:4px; }
+  .settings-summary-title { font-size:13px; font-weight:700; color:var(--text); }
+  .settings-preview { font-size:11px; font-weight:600; color:var(--text-soft);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .settings-body { padding:0 0 4px; }
+
   footer { display:flex; align-items:center; justify-content:center; gap:8px; margin-top:20px;
     font-size:12px; color:var(--text-soft); }
   .sep { opacity:.5; }
@@ -1052,7 +1170,7 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
         <svg class="spark" viewBox="0 0 24 24"><path d="M12 0c.6 3.8 2.2 6.4 5 8.2 2.8 1.8 5.4 2 7 2-1.6 0-4.2.2-7 2C14.2 14 12.6 16.6 12 20.4c-.6-3.8-2.2-6.4-5-8.2-2.8-1.8-5.4-2-7-2 1.6 0 4.2-.2 7-2C9.8 6.4 11.4 3.8 12 0z"/></svg>
         <div>
           <div class="brand-title">Sentinel</div>
-          <div class="brand-sub">เฝ้า ${watch_count} เหรียญ · Price Action 3H</div>
+          <div class="brand-sub">เฝ้า ${watch_count} เหรียญ · Price Action 2H</div>
         </div>
       </div>
       <div class="status-pill ${status_class}"><span class="dot"></span> ${status_label}</div>
@@ -1079,13 +1197,17 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
 ${unlock_button_html}
 
 <form class="control-card" method="POST" action="/control/settings">
-<div class="control-label">ตั้งค่าบอท</div>
-<div class="control-sub">ปรับค่าไหนก็ได้พร้อมกัน ใส่รหัสครั้งเดียวแล้วกดบันทึกทีเดียว</div>
-
-<label style="display:flex; align-items:center; gap:8px; margin-top:14px; font-size:13px; color:var(--text); cursor:pointer;">
-<input type="checkbox" name="paused" value="1" ${paused_checked} style="width:16px;height:16px;flex-shrink:0;">
+<label class="pause-row">
+<input type="checkbox" name="paused" value="1" ${paused_checked}>
 หยุดเทรดอัตโนมัติชั่วคราว (${pause_sub})
 </label>
+<details id="settings-panel" class="settings-fold">
+<summary>
+<span class="settings-summary-title">ตั้งค่าบอท</span>
+<span class="settings-preview">เงิน ${trade_size_percent}% · ${max_open_positions} ช่อง · trail ${trailing_stop_percent}% · SL ${stop_loss_percent}%</span>
+</summary>
+<div class="settings-body">
+<div class="control-sub">ปรับค่าไหนก็ได้พร้อมกัน ใส่รหัสครั้งเดียวแล้วกดบันทึกทีเดียว</div>
 
 <div class="control-label" style="font-size:12px; margin-top:16px;">อัตราเงินที่ใช้เข้าซื้อต่อไม้ (% ของเงินว่าง)</div>
 <input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="100"
@@ -1117,7 +1239,8 @@ name="trailing_stop_percent" value="${trailing_stop_percent}">
 <input class="symbol-input" style="text-transform:none;" type="number" step="0.1" min="0.1" max="50"
 name="stop_loss_percent" value="${stop_loss_percent}">
 <div class="control-sub">เข้าซื้อแล้วราคาไม่ขึ้น ร่วงจากราคาต้นทุนเกิน % นี้ จะขายทันทีเพื่อจำกัดความเสียหาย</div>
-
+</div>
+</details>
 <div class="field-row">
 ${password_field_html}
 <button type="submit" class="btn btn-accent">บันทึกการตั้งค่าทั้งหมด</button>
@@ -1132,7 +1255,7 @@ ${watchlist_rows_html}
 
 <form class="control-card" method="POST" action="/control/watchlist/add">
 <div class="control-label">เพิ่มเหรียญเข้ารายการเฝ้า</div>
-<div class="control-sub">พิมพ์คู่เหรียญแล้วกดเพิ่ม บอทจะดูทุกตัวในรายการด้วยเกณฑ์ขาขึ้น/ลงแบบเดิม
+<div class="control-sub">พิมพ์คู่เหรียญแล้วกดเพิ่ม บอทจะดูทุกตัวในรายการด้วยเกณฑ์ 2 ชม.
 เมื่อขายไม้เก่าแล้ว จะไปมองหาเหรียญถัดไปที่คุณเพิ่มไว้ให้เอง</div>
 <input class="symbol-input" type="text" name="symbol" placeholder="เช่น ETHTHB"
 autocapitalize="characters" autocomplete="off">
@@ -1155,6 +1278,17 @@ ${password_field_html}
       <a href="#" class="refresh-link" onclick="location.reload();return false;">รีเฟรชตอนนี้</a>
     </footer>
   </div>
+<script>
+(function(){
+  var d = document.getElementById("settings-panel");
+  if (!d) return;
+  var key = "sentinel-settings-open";
+  try { if (sessionStorage.getItem(key) === "1") d.open = true; } catch (e) {}
+  d.addEventListener("toggle", function(){
+    try { sessionStorage.setItem(key, d.open ? "1" : "0"); } catch (e) {}
+  });
+})();
+</script>
 </body>
 </html>""")
 
@@ -1179,12 +1313,27 @@ def _render_card(label, value, sub="", value_class=""):
 
 
 def _trend_from_state(state):
-    """เกณฑ์เดียวกับบอท: ทิศทางจาก 1 ชม. แล้วให้คะแนน 2ชม./3ชม. ชม.ละ 50%"""
+    """สูตรเดียวกับบอท: 2 ชม.เป็นหลัก ชม.3 แค่ห้ามซื้อ"""
+    empty = {
+        "direction": None,
+        "confidence": 0,
+        "current": None,
+        "change_1h": 0.0,
+        "change_2h": None,
+        "change_3h": None,
+        "net_2h": None,
+        "elapsed": 0.0,
+        "should_buy": False,
+        "vetoed": False,
+        "reason": "unknown",
+    }
     history = state.get("price_history") or []
     if not history:
-        return None, 0, None, 0.0, 0.0
+        return empty
     current = history[-1][1]
     now = time.time()
+    empty["current"] = current
+    empty["elapsed"] = max(0.0, now - history[0][0])
 
     def price_at(seconds_ago, tolerance=300):
         target = now - seconds_ago
@@ -1196,19 +1345,15 @@ def _trend_from_state(state):
     p1 = price_at(3600)
     p2 = price_at(7200)
     p3 = price_at(10800)
-    elapsed = max(0.0, now - history[0][0])
-    if current is None or p1 is None or current == p1:
-        return None, 0, current, 0.0, elapsed
-    direction = "up" if current > p1 else "down"
-    confidence = 0
-    if p2 is not None:
-        if (direction == "up" and p1 > p2) or (direction == "down" and p1 < p2):
-            confidence += 50
-    if p2 is not None and p3 is not None:
-        if (direction == "up" and p2 > p3) or (direction == "down" and p2 < p3):
-            confidence += 50
-    change_1h = (current - p1) / p1 * 100
-    return direction, confidence, current, change_1h, elapsed
+    if empty["elapsed"] < 7200:
+        empty["reason"] = "waiting_history"
+        if p1 and current:
+            empty["change_1h"] = _pct_change(current, p1) or 0.0
+        return empty
+    signal = evaluate_entry_signal(current, p1, p2, p3)
+    signal["current"] = current
+    signal["elapsed"] = empty["elapsed"]
+    return signal
 
 
 def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
@@ -1386,7 +1531,14 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
     for sym in display_symbols:
         st = states_by_symbol.get(sym) or {}
         status = st.get("status", "IDLE")
-        direction, confidence, current, change_1h, elapsed = _trend_from_state(st)
+        trend = _trend_from_state(st)
+        direction = trend.get("direction")
+        confidence = trend.get("confidence") or 0
+        current = trend.get("current")
+        change_1h = trend.get("change_1h") or 0.0
+        change_2h = trend.get("change_2h")
+        net_2h = trend.get("net_2h")
+        elapsed = trend.get("elapsed") or 0.0
         holding_cls = " is-holding" if status == "HOLDING" else ""
         price_txt = f"{_fmt_thb(current)} ฿" if current is not None else "—"
         chips = []
@@ -1400,17 +1552,34 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
                 chips.append(f'<span class="chip {"up" if d >= 0 else "down"}">{d:+.2f}% จากต้นทุน</span>')
         else:
             chips.append('<span class="chip" >เฝ้าอยู่</span>')
+        if trend.get("should_buy") and status != "HOLDING":
+            chips.append('<span class="chip up">พร้อมซื้อ</span>')
+        elif trend.get("vetoed"):
+            chips.append('<span class="chip down">ชม.3 ห้ามซื้อ</span>')
         if direction == "up":
             chips.append(f'<span class="chip up">ขาขึ้น {confidence}%</span>')
         elif direction == "down":
-            chips.append(f'<span class="chip down">ขาลง {confidence}%</span>')
+            chips.append('<span class="chip down">ขาลง</span>')
         if elapsed and elapsed < 7200 and status != "HOLDING":
             chips.append(f'<span class="chip">รอข้อมูล {int(elapsed // 60)}/120 นาที</span>')
         if change_1h:
             chips.append(f'<span class="chip {"up" if change_1h >= 0 else "down"}">1 ชม. {change_1h:+.2f}%</span>')
-        sub = "เกณฑ์เดิม: ขาขึ้น + ยืนยันอย่างน้อย 50% ถึงเข้าซื้อ"
+        if change_2h is not None:
+            chips.append(f'<span class="chip {"up" if change_2h >= 0 else "down"}">2 ชม. {change_2h:+.2f}%</span>')
+        if net_2h is not None:
+            chips.append(f'<span class="chip {"up" if net_2h >= 0 else "down"}">สุทธิ 2 ชม. {net_2h:+.2f}%</span>')
         if status == "HOLDING":
             sub = f"ต้นทุน {_fmt_thb(float(st.get('entry_price', 0) or 0))} ฿ · ดูแลด้วย trailing / stop loss แบบเดิม"
+        elif elapsed and elapsed < 7200:
+            sub = "รอข้อมูลครบ 2 ชั่วโมงก่อนเริ่มประเมินเข้าซื้อ"
+        else:
+            reason_th = REASON_TH.get(trend.get("reason"), "")
+            if trend.get("should_buy"):
+                sub = "ผ่านเกณฑ์ 2 ชม. — รอช่องว่างเพื่อเข้าซื้อ"
+            elif reason_th:
+                sub = reason_th
+            else:
+                sub = f"เกณฑ์: ชม.1 ≥ {MIN_CHANGE_1H_PERCENT}% และชม.2 ขึ้น, สุทธิ 2 ชม. ≥ {MIN_NET_2H_PERCENT}%"
         coin_parts.append(
             f'<article class="coin-card{holding_cls}">'
             f'<div class="coin-head"><div class="coin-sym">{_display_symbol(sym)}</div>'
@@ -1903,16 +2072,24 @@ if __name__ == "__main__":
                     if signal.get("should_buy"):
                         candidates.append((bot, px, signal))
 
-                candidates.sort(key=lambda item: (item[2]["confidence"], item[2]["change_1h"]), reverse=True)
+                candidates.sort(
+                    key=lambda item: (
+                        item[2]["confidence"],
+                        item[2].get("net_2h") or 0,
+                        item[2]["change_1h"],
+                    ),
+                    reverse=True,
+                )
 
                 for bot, px, signal in candidates:
                     holding_count = sum(1 for b in bots.values() if b.state.get("status") == "HOLDING")
                     if holding_count >= int(control["max_open_positions"]):
                         logger.info("ช่องถือเต็มแล้ว — เหรียญที่เหลือจะรอจนมีช่องว่างหลังขาย")
                         break
+                    net_txt = f"{signal.get('net_2h'):+.2f}%" if signal.get("net_2h") is not None else "n/a"
                     logger.info(
-                        f"[{bot.symbol}] สัญญาณขาขึ้น ยืนยัน {signal['confidence']}% "
-                        f"({signal['change_1h']:+.2f}% ใน 1 ชม.) — พยายามเข้าซื้อ"
+                        f"[{bot.symbol}] สัญญาณขาขึ้น คะแนน {signal['confidence']}% "
+                        f"(ชม.1 {signal['change_1h']:+.2f}%, สุทธิ 2ชม. {net_txt}) — พยายามเข้าซื้อ"
                     )
                     try:
                         bot.try_enter_position(px)
