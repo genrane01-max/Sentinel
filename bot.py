@@ -80,6 +80,61 @@ def _pct_change(newer, older):
     return (newer - older) / older * 100
 
 
+def _safe_float(value, default=None):
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _first_book_price(levels):
+    if not levels:
+        return None
+    row = levels[0]
+    if isinstance(row, dict):
+        for key in ("price", "px", "p", "lastTradePrice"):
+            if key in row:
+                val = _safe_float(row[key])
+                if val is not None and val > 0:
+                    return val
+    elif isinstance(row, (list, tuple)) and row:
+        val = _safe_float(row[0])
+        if val is not None and val > 0:
+            return val
+    else:
+        val = _safe_float(row)
+        if val is not None and val > 0:
+            return val
+    return None
+
+
+def parse_market_price(payload):
+    """ดึงราคาจาก response ของ orderbook/ticker — รองรับ data เป็น dict หรือ list"""
+    if not isinstance(payload, dict) or payload.get("code") != "0000":
+        return None
+    data = payload.get("data")
+    record = None
+    if isinstance(data, dict):
+        record = data
+    elif isinstance(data, list) and data:
+        record = data[0] if isinstance(data[0], dict) else None
+    if not isinstance(record, dict):
+        return None
+    for key in ("lastTradePrice", "last", "close", "lastPrice", "price"):
+        val = _safe_float(record.get(key))
+        if val is not None and val > 0:
+            return val
+    bids = record.get("bids") or record.get("bid") or []
+    asks = record.get("asks") or record.get("ask") or []
+    best_bid = _first_book_price(bids)
+    best_ask = _first_book_price(asks)
+    if best_bid and best_ask:
+        return (best_bid + best_ask) / 2.0
+    return best_bid or best_ask
+
+
 def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ago=None):
     """ตัดสินใจซื้อด้วย 2 ชม.เป็นหลัก ชม.3 ใช้แค่ห้ามซื้อถ้าลงแรง
 
@@ -183,7 +238,11 @@ def _normalize_symbol(raw):
 
 
 def _normalize_watchlist(raw, fallback_symbol):
-    """รับ list / ข้อความ / ค่าว่าง แล้วคืนรายการเหรียญที่ไม่ซ้ำ ตัวพิมพ์ใหญ่"""
+    """รับ list / ข้อความ / ค่าว่าง แล้วคืนรายการเหรียญที่ไม่ซ้ำ ตัวพิมพ์ใหญ่
+
+    None = ยังไม่เคยตั้งค่า → ใช้เหรียญเริ่มต้น
+    list ว่าง / ข้อความว่าง = ผู้ใช้ลบจนหมด → ว่างได้ (บอทจะรอเพิ่มเหรียญจากหน้าเว็บ)
+    """
     symbols = []
     if isinstance(raw, list):
         source = raw
@@ -195,10 +254,14 @@ def _normalize_watchlist(raw, fallback_symbol):
         sym = _normalize_symbol(item)
         if SYMBOL_RE.match(sym) and sym not in symbols:
             symbols.append(sym)
-    fallback = _normalize_symbol(fallback_symbol) or DEFAULT_SYMBOL
-    if not symbols:
-        symbols = [fallback]
-    return symbols
+    if symbols:
+        return symbols
+    if raw is None:
+        fallback = _normalize_symbol(fallback_symbol) or DEFAULT_SYMBOL
+        if SYMBOL_RE.match(fallback):
+            return [fallback]
+        return [DEFAULT_SYMBOL]
+    return []
 
 
 def load_control():
@@ -255,7 +318,7 @@ def load_control():
     watchlist = _normalize_watchlist(data.get("watchlist"), fallback_symbol)
 
     return {
-        "active_symbol": watchlist[0],
+        "active_symbol": watchlist[0] if watchlist else fallback_symbol,
         "watchlist": watchlist,
         "paused": bool(data.get("paused", False)),
         "max_daily_loss_percent": max_daily_loss_percent,
@@ -272,6 +335,8 @@ def save_control(control):
     try:
         if control.get("watchlist"):
             control["active_symbol"] = control["watchlist"][0]
+        elif not control.get("active_symbol"):
+            control["active_symbol"] = DEFAULT_SYMBOL
         db.reference("bot_control").set(control)
     except Exception as e:
         logger.error(f"บันทึก bot_control ไป Firebase ไม่สำเร็จ: {e}")
@@ -419,6 +484,10 @@ class InnovestXTradingBot:
                          f"(ไม่รู้ต้นทุนจริง) บอทจะไม่เทรดอัตโนมัติจนกว่าจะตรวจสอบด้วยมือ")
             self.state["status"] = "HALTED"
             self.save_state()
+        elif self.state["status"] == "HALTED" and coin_free <= dust_threshold:
+            logger.info(f"[{self.symbol}] HALTED แต่เหรียญในพอร์ตหมดแล้ว — ปลดเป็น IDLE ให้เฝ้าต่อได้")
+            self.state.update({"status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
+            self.save_state()
         else:
             logger.info(f"Reconcile ผ่าน: state={self.state['status']} ตรงกับพอร์ตจริง "
                         f"({coin_free} {self.target_currency})")
@@ -505,38 +574,26 @@ class InnovestXTradingBot:
 
     # ==================== Market data / price history ====================
     def get_latest_price(self):
-
-        """ดึงราคาจับคู่ซื้อขายล่าสุดจริง (Last Trade Price) แบบเรียลไทม์จาก Level 2 Order Book"""
-
+        """ดึงราคาล่าสุด: ชอบ lastTradePrice ถ้ามี ไม่ครบก็ใช้ mid ของ best bid/ask แล้วค่อย fallback ticker"""
         path = "/api/v1/digital-asset/orderbook/lvl2"
-
         body = {"symbol": self.symbol, "depth": 1}
-
         res = self.send_request("POST", path, body=body)
+        price = parse_market_price(res)
+        if price:
+            return price
+
+        ticker_res = self.send_request(
+            "POST", "/api/v1/digital-asset/ticker/subscribe", body={"symbol": self.symbol}
+        )
+        price = parse_market_price(ticker_res)
+        if price:
+            logger.info(f"[{self.symbol}] ใช้ราคาจาก ticker แทน orderbook")
+            return price
 
         if res and res.get("code") == "0000":
-
-            data = res.get("data")
-
-            if isinstance(data, list) and data:
-
-                first_record = data[0]
-
-                if isinstance(first_record, dict) and "lastTradePrice" in first_record:
-
-                    try:
-
-                        return float(first_record["lastTradePrice"])
-
-                    except (TypeError, ValueError):
-
-                        pass
-
-            # DEBUG: log response จริงเมื่อ parse ไม่ได้ ทั้งที่ code=0000
-            logger.warning(f"DEBUG raw orderbook response: {json.dumps(res)[:800]}")
-
-        logger.warning("ดึงราคาล่าสุดเรียลไทม์ (lastTradePrice) ล้มเหลว")
-
+            logger.warning(f"[{self.symbol}] ดึงราคาไม่ได้ โครงสร้างไม่ตรงที่คาด: {json.dumps(res)[:800]}")
+        else:
+            logger.warning(f"[{self.symbol}] ดึงราคาล่าสุดล้มเหลว")
         return None
 
     def _record_price_tick(self, price):
@@ -604,6 +661,16 @@ class InnovestXTradingBot:
         except (InvalidOperation, ZeroDivisionError):
             return value
 
+    def _format_to_increment(self, value, increment_str):
+        """ปัดลงแล้วคืนเป็น string ตามจำนวนทศนิยมของ step — ส่งเข้า API เป็น string กัน float เพี้ยน"""
+        floored = self._floor_to_increment(value, increment_str)
+        try:
+            inc = Decimal(str(increment_str))
+            exp = -inc.as_tuple().exponent if inc.as_tuple().exponent < 0 else 0
+            return format(Decimal(str(floored)), f".{exp}f")
+        except (InvalidOperation, ValueError, TypeError):
+            return str(floored)
+
     def estimate_roundtrip_fee_percent(self):
         """พยายามดึงค่าธรรมเนียมจริงจาก API และคำนวณเป็นเปอร์เซ็นต์; ถ้าทำไม่ได้ให้ใช้ค่า default แทน"""
         dummy_amount = 0.01
@@ -644,8 +711,8 @@ class InnovestXTradingBot:
         if balance_res and balance_res.get("code") == "0000":
             for asset in balance_res.get("data", []):
                 prod_name = asset.get("product")
-                total_amount = float(asset.get("amount", 0.0))
-                hold_amount = float(asset.get("hold", 0.0))
+                total_amount = _safe_float(asset.get("amount"), 0.0) or 0.0
+                hold_amount = _safe_float(asset.get("hold"), 0.0) or 0.0
                 free_amount = total_amount - hold_amount
                 if prod_name == self.base_currency:
                     thb_free = free_amount
@@ -688,7 +755,7 @@ class InnovestXTradingBot:
             if res and res.get("code") == "0000":
                 orders = res.get("data", [])
                 if orders:
-                    avg_price = float(orders[0].get("avgPrice", 0.0))
+                    avg_price = _safe_float(orders[0].get("avgPrice"), 0.0) or 0.0
                     if avg_price > 0:
                         return avg_price
             logger.info(f"รอ order {order_id} matching... (ครั้งที่ {attempt}/{max_attempts})")
@@ -716,36 +783,31 @@ class InnovestXTradingBot:
         risk = load_shared_risk()
         if risk.get("trade_date") == today:
             return
-        if self.state.get("trade_date") != today:
-            thb_free, _, _ = self.get_free_balance()
-            
-            # คำนวณมูลค่าพอร์ตรวม (Total Equity) ณ เที่ยงคืนเพื่อใช้เป็นฐานคำนวณ % ขาดทุนที่แท้จริง
-            total_equity = thb_free
-            if self.state["status"] == "HOLDING" and self.state["quantity"] > 0:
-                latest_price = self.get_latest_price()
-                if latest_price:
-                    total_equity += (self.state["quantity"] * latest_price)
-                else:
-                    total_equity += (self.state["quantity"] * self.state["entry_price"])
-                    
-            self.state["trade_date"] = today
-            self.state["daily_start_balance"] = total_equity  # ใช้ยอดพอร์ตรวมเป็นฐานคำนวณแทนเงินสดว่าง
-            self.state["daily_realized_pnl"] = 0.0
-            self.state["consecutive_losses"] = 0
-            
-            if self.state["status"] == "HALTED":
-                logger.info("วันใหม่: ปลดล็อก Circuit Breaker อัตโนมัติ กลับสู่สถานะ IDLE")
-                self.state["status"] = "IDLE"
-            self.save_state()
+        thb_free, _, _ = self.get_free_balance()
+        
+        # คำนวณมูลค่าพอร์ตรวม (Total Equity) ณ เที่ยงคืนเพื่อใช้เป็นฐานคำนวณ % ขาดทุนที่แท้จริง
+        total_equity = thb_free
+        if self.state["status"] == "HOLDING" and self.state["quantity"] > 0:
+            latest_price = self.get_latest_price()
+            if latest_price:
+                total_equity += (self.state["quantity"] * latest_price)
+            else:
+                total_equity += (self.state["quantity"] * self.state["entry_price"])
+                
+        self.state["trade_date"] = today
+        self.state["daily_start_balance"] = total_equity  # ใช้ยอดพอร์ตรวมเป็นฐานคำนวณแทนเงินสดว่าง
+        self.state["daily_realized_pnl"] = 0.0
+        self.state["consecutive_losses"] = 0
+        self.save_state()
 
-            risk["trade_date"] = today
-            risk["daily_start_balance"] = total_equity
-            risk["daily_realized_pnl"] = 0.0
-            risk["consecutive_losses"] = 0
-            if risk.get("status") == "HALTED":
-                risk["status"] = "IDLE"
-            save_shared_risk(risk)
-            logger.info(f"เริ่มวันใหม่ ({today}) มูลค่าพอร์ตรวมตั้งต้น: {total_equity:.2f} THB")
+        risk["trade_date"] = today
+        risk["daily_start_balance"] = total_equity
+        risk["daily_realized_pnl"] = 0.0
+        risk["consecutive_losses"] = 0
+        if risk.get("status") == "HALTED":
+            risk["status"] = "IDLE"
+        save_shared_risk(risk)
+        logger.info(f"เริ่มวันใหม่ ({today}) มูลค่าพอร์ตรวมตั้งต้น: {total_equity:.2f} THB")
 
     def _register_trade_result(self, pnl_thb):
         risk = load_shared_risk()
@@ -862,22 +924,36 @@ class InnovestXTradingBot:
             return False
 
         slots = max(1, int(available_slots or 1))
-        allocation = thb_free / slots
+        while slots > 1 and round((thb_free / slots) * (self.trade_size_percent / 100.0), 2) < self.MIN_ORDER_THB:
+            slots -= 1
         rules = self.get_symbol_rules()
-        buy_value = round(allocation * (self.trade_size_percent / 100.0), 2)
+        buy_value = round((thb_free / slots) * (self.trade_size_percent / 100.0), 2)
+        if buy_value < self.MIN_ORDER_THB:
+            logger.info(
+                f"[{self.symbol}] เงินที่แบ่งได้ {buy_value:.2f} THB ต่ำกว่าขั้นต่ำ {self.MIN_ORDER_THB} THB — ข้าม"
+            )
+            return False
         order_res = self.execute_market_order(side=0, value=buy_value)
 
         if not (order_res and order_res.get("code") == "0000"):
             logger.warning(f"[{self.symbol}] ยิงออเดอร์ซื้อล้มเหลว: {order_res}")
             return False
 
-        order_id = order_res["data"]["orderId"]
+        order_id = (order_res.get("data") or {}).get("orderId")
+        if not order_id:
+            logger.warning(f"[{self.symbol}] ซื้อสำเร็จแต่ไม่มี orderId: {order_res}")
+            return False
         logger.info(f"[{self.symbol}] ✔ ส่งคำสั่งซื้อสำเร็จ Order ID: {order_id} กำลังยืนยันราคาจับคู่จริง...")
 
         avg_price = self.confirm_fill_price(order_id)
-        if avg_price == 0.0:
+        if not avg_price:
             avg_price = current_price
             logger.warning(f"[{self.symbol}] ยืนยันราคาจับคู่จริงไม่ได้ ใช้ราคาตลาด ณ ขณะนั้นแทน (ควรตรวจสอบ order ด้วยมือ)")
+        if not avg_price:
+            logger.error(f"[{self.symbol}] ไม่มีราคาสำหรับคำนวณจำนวนเหรียญ — ตั้ง HOLDING ชั่วคราว รอ reconcile")
+            self.state.update({"status": "HOLDING", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
+            self.save_state()
+            return True
 
         self._check_slippage(current_price, avg_price, "ซื้อ")
 
@@ -954,20 +1030,27 @@ class InnovestXTradingBot:
             logger.info("ข้ามการขาย: มีออเดอร์ค้างอยู่ในระบบ")
             return
 
-        sell_qty = min(qty, coin_free)
+        sell_qty = min(float(qty or 0), float(coin_free or 0))
         rules = self.get_symbol_rules()
-        sell_qty = self._floor_to_increment(sell_qty, rules["quantity_increment"])
+        sell_qty_str = self._format_to_increment(sell_qty, rules["quantity_increment"])
+        try:
+            sell_qty = float(Decimal(sell_qty_str))
+        except (InvalidOperation, ValueError, TypeError):
+            sell_qty = self._floor_to_increment(sell_qty, rules["quantity_increment"])
 
         if sell_qty <= 0:
             logger.warning(f"ไม่มียอดเหรียญ {self.target_currency} พร้อมขาย (คงเหลือจริง {coin_free})")
             return
 
-        order_res = self.execute_market_order(side=1, quantity=sell_qty)
+        order_res = self.execute_market_order(side=1, quantity=sell_qty_str)
         if not (order_res and order_res.get("code") == "0000"):
             logger.warning(f"สั่งขายล้มเหลว: {order_res}")
             return
 
-        order_id = order_res["data"]["orderId"]
+        order_id = (order_res.get("data") or {}).get("orderId")
+        if not order_id:
+            logger.warning(f"สั่งขายล้มเหลว: ไม่มี orderId {order_res}")
+            return
         sell_avg_price = self.confirm_fill_price(order_id)
 
         if sell_avg_price > 0 and current_price is not None:
@@ -978,6 +1061,9 @@ class InnovestXTradingBot:
 
         if sell_avg_price == 0.0:
             logger.warning("ยืนยันราคาขายจริงไม่ได้ — ข้าม PnL tracking รอบนี้ (ตรวจสอบ order ด้วยมือ)")
+            self.state.update({"status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
+            self.save_state()
+            return
 
         logger.info(f"✔ ขายสำเร็จ ราคาเฉลี่ย {sell_avg_price or 'N/A'} PnL รอบนี้ {pnl_thb:.2f} THB")
 
@@ -1035,7 +1121,6 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="refresh" content="30">
 <title>Sentinel · เฝ้า ${watch_count} เหรียญ</title>
 <style>
   :root {
@@ -1141,7 +1226,8 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
     cursor:pointer; }
   .watch-row-main { min-width:0; }
   .watch-row input[type="checkbox"] { width:18px; height:18px; flex-shrink:0; accent-color:var(--red); }
-  .watch-row input[type="checkbox"]:disabled { opacity:.35; }
+  .watch-remove { display:flex; align-items:center; gap:6px; font-size:11px; font-weight:700;
+    color:var(--red); flex-shrink:0; white-space:nowrap; }
   .watch-sym { font-size:13px; font-weight:700; letter-spacing:0.03em; }
   .watch-meta { font-size:11px; color:var(--text-soft); margin-top:2px; }
 
@@ -1322,6 +1408,11 @@ ${password_field_html}
   }
   persistFold("settings-panel", "sentinel-settings-open");
   persistFold("watchlist-panel", "sentinel-watchlist-open");
+  setTimeout(function(){
+    var ae = document.activeElement;
+    if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT")) return;
+    location.reload();
+  }, 30000);
 })();
 function addSymbolPick(sym){
   var el = document.getElementById('add-symbols-input');
@@ -1503,7 +1594,7 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
     if control.get("paused"):
         banners.append(
             '<div class="banner banner-info">บอทหยุดเทรดชั่วคราว (สั่งจากหน้านี้) '
-            "— จะไม่เปิดออเดอร์ใหม่จนกว่าจะกด เริ่มเทรดต่อ</div>"
+            "— จะไม่เปิดออเดอร์ซื้อใหม่ แต่ยังดูแลไม้ที่ถืออยู่ (stop loss / trailing)</div>"
         )
 
     if pending_remove:
@@ -1644,13 +1735,12 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         st = states_by_symbol.get(sym) or {}
         status = st.get("status", "IDLE")
         holding = status == "HOLDING"
-        meta = "ถืออยู่ — ต้องขายก่อนจึงเอาออกได้" if holding else "เฝ้าอยู่ รอสัญญาณขาขึ้น"
-        disabled = "disabled" if holding else ""
+        meta = "ถืออยู่ — ติ๊กเอาออกได้ บอทจะรอขายก่อนแล้วค่อยเลิกเฝ้า" if holding else "เฝ้าอยู่ รอสัญญาณขาขึ้น"
         watch_rows.append(
             '<label class="watch-row">'
             f'<div class="watch-row-main"><div class="watch-sym">{_display_symbol(sym)}</div>'
             f'<div class="watch-meta">{meta}</div></div>'
-            f'<input type="checkbox" name="remove_symbols" value="{sym}" {disabled}>'
+            f'<span class="watch-remove">เอาออก <input type="checkbox" name="remove_symbols" value="{sym}"></span>'
             "</label>"
         )
     if not watchlist:
@@ -1967,8 +2057,7 @@ def maybe_reset_shared_daily(bots):
         bot.state["daily_start_balance"] = total_equity
         bot.state["daily_realized_pnl"] = 0.0
         bot.state["consecutive_losses"] = 0
-        if bot.state.get("status") == "HALTED":
-            bot.state["status"] = "IDLE"
+        # ไม่ปลด per-coin HALTED จาก reconcile อัตโนมัติ — กันการซื้อซ้ำทับเหรียญที่ยังไม่รู้ต้นทุน
         bot.save_state()
 
     logger.info(f"เริ่มวันใหม่ ({today}) มูลค่าพอร์ตรวมตั้งต้น: {total_equity:.2f} THB")
@@ -2053,11 +2142,8 @@ if __name__ == "__main__":
                 risk["status"] = "IDLE"
                 risk["consecutive_losses"] = 0
                 save_shared_risk(risk)
-            for bot in bots.values():
-                if bot.state.get("status") == "HALTED":
-                    bot.state["status"] = "IDLE"
-                    bot.state["consecutive_losses"] = 0
-                    bot.save_state()
+            # ไม่แตะ per-coin HALTED จาก reconcile (เหรียญค้างโดยไม่รู้ต้นทุน)
+            # เหรียญพวกนั้นจะกลับ IDLE เองเมื่อ reconcile เห็นว่าเหรียญในพอร์ตหมดแล้ว
             control["unlock_requested"] = False
             save_control(control)
 
@@ -2067,12 +2153,14 @@ if __name__ == "__main__":
         if not bots:
             logger.info("รายการเฝ้าว่าง — รอเพิ่มเหรียญจากหน้าเว็บ")
         elif control["paused"]:
-            logger.info("บอทหยุดชั่วคราว (สั่งโดยผู้ใช้ผ่านหน้าเว็บ) — ยังเก็บราคาต่อ แต่ไม่เปิดออเดอร์ใหม่")
+            logger.info("บอทหยุดชั่วคราว (สั่งโดยผู้ใช้ผ่านหน้าเว็บ) — ไม่เปิดออเดอร์ซื้อใหม่ แต่ยังดูแลไม้ที่ถืออยู่ (stop loss / trailing)")
             for bot in bots.values():
                 try:
-                    bot.poll_price()
+                    px = bot.poll_price()
+                    if px is not None and bot.state.get("status") == "HOLDING":
+                        bot.run_strategy(px)
                 except Exception:
-                    logger.exception(f"[{bot.symbol}] ดึงราคาตอนหยุดชั่วคราวล้มเหลว")
+                    logger.exception(f"[{bot.symbol}] ดึงราคา/ดูแลโพซิชันตอนหยุดชั่วคราวล้มเหลว")
         else:
             prices = {}
             for bot in bots.values():
