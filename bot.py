@@ -1,23 +1,15 @@
 """
-InnovestX Automated Trading Bot — Price Action 3H Strategy (v4, dashboard + control + ปรับอัตราเงิน/จำนวนไม้ขาดทุนได้จากหน้าเว็บ)
+InnovestX Automated Trading Bot — Price Action 3H Strategy
+(v5, เฝ้าหลายเหรียญจากหน้าเว็บ + ถือได้พร้อมกันหลายตัว)
 
-สืบเนื่องจาก v3 (dashboard + control) เดิม เพิ่มเติมในเวอร์ชันนี้:
+ของใหม่ในเวอร์ชันนี้:
+1. เพิ่ม/ลบเหรียญที่ให้บอทเฝ้าได้จากหน้าเว็บ (watchlist) ไม่จำกัดแค่เหรียญเดียว
+2. บอทดูทุกเหรียญในรายการด้วยเกณฑ์ขาขึ้น/ลงแบบเดิม (Price Action 3H, ยืนยัน 50%)
+3. เข้าซื้อเหรียญที่เป็นขาขึ้นเมื่อยังมีช่องว่าง — ขายแล้วมองหาเหรียญถัดไปในรายการทันที
+4. ตั้งจำนวนเหรียญสูงสุดที่ถือพร้อมกันได้จากหน้าเว็บ
 
-1. ปรับ "อัตราเงินที่ใช้เข้าซื้อต่อไม้" ได้จากหน้าเว็บ (% ของเงินบาทว่าง) แทนที่จะ fix ไว้ที่ 95% ตายตัว
-2. ปรับ "จำนวนไม้ขาดทุนติดกันก่อนหยุดเทรด (Circuit Breaker)" ได้จากหน้าเว็บ แทนที่จะ fix ไว้ที่ 3 ไม้ตายตัว
-3. ปุ่ม "ปลดล็อกตอนนี้" (ไม่ต้องรอข้ามวัน) มีอยู่แล้วตั้งแต่ v3 — ไม่ได้แก้เพิ่มในเวอร์ชันนี้
-
-ของเดิมจาก v3 (ยังอยู่ครบ ไม่ได้ตัดออก): หน้าแดชบอร์ด, เลือกเหรียญจากหน้าเว็บ, ปุ่มหยุด/เริ่มเทรดต่อ,
-รหัสผ่านป้องกันหน้าควบคุม (DASHBOARD_PASSWORD), ปรับ % ขาดทุนสูงสุดต่อวันจากหน้าเว็บ,
-price_history สะสมจริงจาก Firebase, คำนวณค่าธรรมเนียมเข้าไปในจุดตัดสินใจขาย, จัดการ error code เฉพาะทาง,
-Circuit breaker, log ทุก request-uid, ใช้ Decimal ปัดจำนวนเหรียญ, เช็ค minimum notional, graceful shutdown
-
-⚠️ สมมติฐานที่ต้องตรวจสอบกับเอกสาร API ฉบับเต็มก่อนรันจริง (เหมือนเดิมจาก v3):
-- FEE_ESTIMATE_PATH ด้านล่าง: คู่มือพูดถึงฟีเจอร์ "Get Estimate Fee" แต่ไม่ได้ให้ path ตรงๆ
-  ตั้งตาม naming convention ของ endpoint อื่นที่มีอยู่แล้ว — ต้องยืนยันก่อนใช้จริง
-- get_latest_price(): คู่มือเรียก ticker ว่า "Subscribe" และบอกว่าส่งข้อมูลทุก 1 นาที
-  ฟังดูเหมือน WebSocket push มากกว่า REST request/response ปกติ — ถ้า endpoint นี้ใช้แบบ REST จริงไม่ได้
-  ให้เปลี่ยนมาใช้ WebSocket client แทนการ poll ในฟังก์ชันนี้
+ของเดิมยังอยู่ครบ: แดชบอร์ด, หยุด/เริ่มเทรด, รหัสผ่าน, % ขาดทุนต่อวัน, อัตราเงินต่อไม้,
+จำนวนไม้ขาดทุนติดกัน, price_history ต่อเหรียญ, ค่าธรรมเนียม, circuit breaker, Decimal, graceful shutdown
 """
 
 import time
@@ -66,11 +58,39 @@ init_firebase()
 # ==================== การควบคุมบอทจากหน้าเว็บ ====================
 DEFAULT_SYMBOL = os.environ.get("SYMBOL", "BTCTHB").upper()
 RUNNING_SYMBOL = {"value": DEFAULT_SYMBOL}
+RUNNING_WATCHLIST = {"value": [DEFAULT_SYMBOL]}
+STOP_ALL = {"value": False}
+SHARED_RISK_PATH = "bots/_shared/risk"
+SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}$")
+# เกณฑ์เดิม: ต้องมี 2ชม. หรือ 3ชม. ยืนยันทิศทางเดียวกันอย่างน้อย 1 ใน 2
+MIN_CONFIDENCE_TO_BUY = 50
+
+
+def _normalize_symbol(raw):
+    return str(raw or "").strip().upper()
+
+
+def _normalize_watchlist(raw, fallback_symbol):
+    """รับ list / ข้อความ / ค่าว่าง แล้วคืนรายการเหรียญที่ไม่ซ้ำ ตัวพิมพ์ใหญ่"""
+    symbols = []
+    if isinstance(raw, list):
+        source = raw
+    elif isinstance(raw, str) and raw.strip():
+        source = re.split(r"[\s,]+", raw.strip())
+    else:
+        source = []
+    for item in source:
+        sym = _normalize_symbol(item)
+        if SYMBOL_RE.match(sym) and sym not in symbols:
+            symbols.append(sym)
+    fallback = _normalize_symbol(fallback_symbol) or DEFAULT_SYMBOL
+    if not symbols:
+        symbols = [fallback]
+    return symbols
 
 
 def load_control():
-    """อ่านคำสั่งควบคุมล่าสุดจากหน้าเว็บ (เหรียญที่ต้องการ, หยุดชั่วคราวหรือไม่, % ขาดทุนสูงสุดต่อวัน,
-    อัตราเงินที่ใช้เข้าซื้อต่อไม้, จำนวนไม้ขาดทุนติดกันก่อนหยุด)"""
+    """อ่านคำสั่งควบคุมล่าสุดจากหน้าเว็บ (รายการเหรียญที่เฝ้า, หยุดชั่วคราว, ความเสี่ยง, จำนวนช่องถือพร้อมกัน)"""
     try:
         data = db.reference("bot_control").get() or {}
     except Exception as e:
@@ -98,21 +118,60 @@ def load_control():
     if not (1 <= max_consecutive_losses <= 20):
         max_consecutive_losses = InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES
 
+    try:
+        max_open_positions = int(float(data.get("max_open_positions", InnovestXTradingBot.DEFAULT_MAX_OPEN_POSITIONS)))
+    except (TypeError, ValueError):
+        max_open_positions = InnovestXTradingBot.DEFAULT_MAX_OPEN_POSITIONS
+    if not (1 <= max_open_positions <= 10):
+        max_open_positions = InnovestXTradingBot.DEFAULT_MAX_OPEN_POSITIONS
+
+    fallback_symbol = _normalize_symbol(data.get("active_symbol") or DEFAULT_SYMBOL)
+    watchlist = _normalize_watchlist(data.get("watchlist"), fallback_symbol)
+
     return {
-        "active_symbol": (data.get("active_symbol") or DEFAULT_SYMBOL).upper(),
+        "active_symbol": watchlist[0],
+        "watchlist": watchlist,
         "paused": bool(data.get("paused", False)),
         "max_daily_loss_percent": max_daily_loss_percent,
         "trade_size_percent": trade_size_percent,
         "max_consecutive_losses": max_consecutive_losses,
+        "max_open_positions": max_open_positions,
         "unlock_requested": bool(data.get("unlock_requested", False)),
     }
 
 
 def save_control(control):
     try:
+        if control.get("watchlist"):
+            control["active_symbol"] = control["watchlist"][0]
         db.reference("bot_control").set(control)
     except Exception as e:
         logger.error(f"บันทึก bot_control ไป Firebase ไม่สำเร็จ: {e}")
+
+
+def load_shared_risk():
+    """ความเสี่ยงระดับบัญชี (ใช้ร่วมทุกเหรียญ) — ขาดทุนวันนี้ / ไม้ติดกัน / HALTED"""
+    default = {
+        "status": "IDLE",
+        "trade_date": None,
+        "daily_start_balance": 0.0,
+        "daily_realized_pnl": 0.0,
+        "consecutive_losses": 0,
+    }
+    try:
+        saved = db.reference(SHARED_RISK_PATH).get()
+        if saved:
+            default.update(saved)
+    except Exception as e:
+        logger.warning(f"อ่าน shared risk จาก Firebase ไม่ได้ ใช้ค่าเริ่มต้น: {e}")
+    return default
+
+
+def save_shared_risk(risk):
+    try:
+        db.reference(SHARED_RISK_PATH).set(risk)
+    except Exception as e:
+        logger.error(f"บันทึก shared risk ไป Firebase ไม่สำเร็จ: {e}")
 
 
 class InnovestXTradingBot:
@@ -120,6 +179,7 @@ class InnovestXTradingBot:
     MAX_DAILY_LOSS_PERCENT = 5.0        # หยุดเทรดถ้าขาดทุนสะสมวันนี้เกิน % ของทุนเริ่มวัน (ปรับได้จากหน้าเว็บ)
     MAX_CONSECUTIVE_LOSSES = 3          # หยุดเทรดถ้าขาดทุนติดกันกี่ไม้ (ปรับได้จากหน้าเว็บ)
     DEFAULT_TRADE_SIZE_PERCENT = 95.0   # % ของเงินบาทว่างที่ใช้เข้าซื้อต่อไม้ (ปรับได้จากหน้าเว็บ)
+    DEFAULT_MAX_OPEN_POSITIONS = 3      # ถือได้พร้อมกันกี่เหรียญ (ปรับได้จากหน้าเว็บ)
     DEFAULT_ROUNDTRIP_FEE_PERCENT = 0.50  # fallback ถ้าดึงค่าธรรมเนียมจริงไม่ได้ (ปรับให้ตรงจริง!)
     MIN_ORDER_THB = 100.0
     MAX_ACCEPTABLE_SLIPPAGE_PERCENT = 1.0  # ถ้าราคาจริงเพี้ยนจากที่คาดเกิน % นี้จะแจ้งเตือน
@@ -194,6 +254,7 @@ class InnovestXTradingBot:
     def _handle_shutdown(self, signum, frame):
         logger.info(f"ได้รับสัญญาณหยุด ({signum}) กำลังบันทึกสถานะก่อนปิดบอท...")
         self._stop_requested = True
+        STOP_ALL["value"] = True
         self.save_state()
 
     def reconcile_state_on_startup(self):
@@ -521,6 +582,9 @@ class InnovestXTradingBot:
 
     def _maybe_reset_daily_counters(self):
         today = self._today_str()
+        risk = load_shared_risk()
+        if risk.get("trade_date") == today:
+            return
         if self.state.get("trade_date") != today:
             thb_free, _, _ = self.get_free_balance()
             
@@ -542,109 +606,157 @@ class InnovestXTradingBot:
                 logger.info("วันใหม่: ปลดล็อก Circuit Breaker อัตโนมัติ กลับสู่สถานะ IDLE")
                 self.state["status"] = "IDLE"
             self.save_state()
+
+            risk["trade_date"] = today
+            risk["daily_start_balance"] = total_equity
+            risk["daily_realized_pnl"] = 0.0
+            risk["consecutive_losses"] = 0
+            if risk.get("status") == "HALTED":
+                risk["status"] = "IDLE"
+            save_shared_risk(risk)
             logger.info(f"เริ่มวันใหม่ ({today}) มูลค่าพอร์ตรวมตั้งต้น: {total_equity:.2f} THB")
 
     def _register_trade_result(self, pnl_thb):
-        self.state["daily_realized_pnl"] += pnl_thb
+        risk = load_shared_risk()
+        risk["daily_realized_pnl"] = float(risk.get("daily_realized_pnl", 0.0) or 0.0) + pnl_thb
         if pnl_thb < 0:
-            self.state["consecutive_losses"] += 1
+            risk["consecutive_losses"] = int(risk.get("consecutive_losses", 0) or 0) + 1
         else:
-            self.state["consecutive_losses"] = 0
+            risk["consecutive_losses"] = 0
+
+        # เก็บสำเนาไว้ที่ state ของเหรียญนี้ด้วย เพื่อให้แดชบอร์ดเหรียญเดียวยังอ่านได้
+        self.state["daily_realized_pnl"] = risk["daily_realized_pnl"]
+        self.state["consecutive_losses"] = risk["consecutive_losses"]
+        if risk.get("daily_start_balance"):
+            self.state["daily_start_balance"] = risk["daily_start_balance"]
 
         daily_loss_percent = 0.0
-        if self.state["daily_start_balance"] > 0:
-            daily_loss_percent = -self.state["daily_realized_pnl"] / self.state["daily_start_balance"] * 100
+        start = float(risk.get("daily_start_balance", 0.0) or 0.0)
+        if start > 0:
+            daily_loss_percent = -risk["daily_realized_pnl"] / start * 100
 
         halt_reason = None
         if daily_loss_percent >= self.max_daily_loss_percent:
             halt_reason = f"ขาดทุนสะสมวันนี้ {daily_loss_percent:.2f}% เกินเพดาน {self.max_daily_loss_percent}%"
-        elif self.state["consecutive_losses"] >= self.max_consecutive_losses:
-            halt_reason = f"ขาดทุนติดกัน {self.state['consecutive_losses']} ไม้ ถึงเพดาน {self.max_consecutive_losses} ไม้"
+        elif risk["consecutive_losses"] >= self.max_consecutive_losses:
+            halt_reason = f"ขาดทุนติดกัน {risk['consecutive_losses']} ไม้ ถึงเพดาน {self.max_consecutive_losses} ไม้"
 
         if halt_reason:
-            self.state["status"] = "HALTED"
-            logger.error(f"🛑 CIRCUIT BREAKER ทำงาน: {halt_reason} — บอทหยุดเทรด "
-                         f"(ปลดล็อกอัตโนมัติวันถัดไป หรือแก้ status บน Firebase ที่ path "
-                         f"'{self.state_path}' ด้วยมือ)")
+            risk["status"] = "HALTED"
+            logger.error(f"🛑 CIRCUIT BREAKER ทำงาน: {halt_reason} — หยุดเปิดออเดอร์ซื้อใหม่ "
+                         f"(โพซิชันที่ถืออยู่ยังถูกดูแลต่อ จนกว่าจะขาย) "
+                         f"ปลดล็อกอัตโนมัติวันถัดไป หรือกดปลดล็อกจากหน้าเว็บ")
+        save_shared_risk(risk)
         self.save_state()
 
     # ==================== Strategy ====================
+    def analyze_trend(self, current_price):
+        """ประเมินขาขึ้น/ลงด้วยเกณฑ์เดิม (Price Action 3H) — ยังไม่ซื้อ แค่ให้คะแนน"""
+        empty = {
+            "ready": False,
+            "should_buy": False,
+            "direction": None,
+            "confidence": 0,
+            "change_1h": 0.0,
+            "reason": "unknown",
+        }
+        if current_price is None:
+            empty["reason"] = "no_price"
+            return empty
+
+        if not self._has_enough_history():
+            logger.info(f"[{self.symbol}] ข้อมูลราคาย้อนหลังยังไม่ครบ 2 ชั่วโมง รอสะสมข้อมูลต่อ")
+            empty["reason"] = "waiting_history"
+            return empty
+
+        price_1h_ago = self._price_at_offset(3600)
+        price_2h_ago = self._price_at_offset(7200)
+        price_3h_ago = self._price_at_offset(10800)
+
+        if price_1h_ago is None:
+            logger.info(f"[{self.symbol}] ข้อมูลราคาบางช่วงขาดหาย (gap) รอรอบถัดไป")
+            empty["reason"] = "gap"
+            return empty
+
+        direction, confidence = self._trend_confidence(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
+        change_1h = ((current_price - price_1h_ago) / price_1h_ago * 100) if price_1h_ago else 0.0
+        should_buy = direction == "up" and confidence >= MIN_CONFIDENCE_TO_BUY
+
+        logger.info(
+            f"[{self.symbol}] ทิศทาง 1ชม: {direction or 'flat'} "
+            f"(ยืนยัน {confidence}%) เปลี่ยน {change_1h:+.2f}%"
+        )
+        if direction == "down":
+            logger.info(f"[{self.symbol}] เห็นสัญญาณขาลง (ยืนยัน {confidence}%) — ไม่เข้าซื้อ")
+
+        return {
+            "ready": True,
+            "should_buy": should_buy,
+            "direction": direction,
+            "confidence": confidence,
+            "change_1h": change_1h,
+            "reason": None if should_buy else ("down" if direction == "down" else "weak"),
+        }
+
+    def try_enter_position(self, current_price):
+        """เข้าซื้อด้วยกติกาเดิม (ใช้ % เงินว่างต่อไม้) — เรียกเมื่อผ่านเกณฑ์ขาขึ้นแล้วเท่านั้น"""
+        if self.state["status"] != "IDLE":
+            return False
+
+        thb_free, _, has_pending = self.get_free_balance()
+        if has_pending:
+            logger.info(f"[{self.symbol}] ข้ามการซื้อ: มีออเดอร์ค้างอยู่ในระบบ")
+            return False
+        if thb_free <= self.MIN_ORDER_THB:
+            logger.info(f"[{self.symbol}] เงินว่างไม่พอสำหรับซื้อขั้นต่ำ (คงเหลือ {thb_free:.2f} THB)")
+            return False
+
+        rules = self.get_symbol_rules()
+        buy_value = round(thb_free * (self.trade_size_percent / 100.0), 2)
+        order_res = self.execute_market_order(side=0, value=buy_value)
+
+        if not (order_res and order_res.get("code") == "0000"):
+            logger.warning(f"[{self.symbol}] ยิงออเดอร์ซื้อล้มเหลว: {order_res}")
+            return False
+
+        order_id = order_res["data"]["orderId"]
+        logger.info(f"[{self.symbol}] ✔ ส่งคำสั่งซื้อสำเร็จ Order ID: {order_id} กำลังยืนยันราคาจับคู่จริง...")
+
+        avg_price = self.confirm_fill_price(order_id)
+        if avg_price == 0.0:
+            avg_price = current_price
+            logger.warning(f"[{self.symbol}] ยืนยันราคาจับคู่จริงไม่ได้ ใช้ราคาตลาด ณ ขณะนั้นแทน (ควรตรวจสอบ order ด้วยมือ)")
+
+        self._check_slippage(current_price, avg_price, "ซื้อ")
+
+        fee_pct = self.estimate_roundtrip_fee_percent()
+        one_way_fee_factor = (fee_pct / 2) / 100
+
+        raw_qty = (buy_value / avg_price) * (1 - one_way_fee_factor)
+        estimated_qty = self._floor_to_increment(raw_qty, rules["quantity_increment"])
+
+        self.state.update({
+            "status": "HOLDING",
+            "entry_price": avg_price,
+            "highest_price": avg_price,
+            "quantity": estimated_qty,
+            "roundtrip_fee_percent": fee_pct,
+        })
+        self.save_state()
+
+        logger.info(
+            f"[{self.symbol}] ซื้อสำเร็จ ต้นทุนเฉลี่ย {avg_price} THB จำนวน {estimated_qty} "
+            f"(ค่าธรรมเนียม round-trip โดยประมาณ {fee_pct:.3f}%)"
+        )
+        return True
+
     def run_strategy(self, current_price):
-        if self.state["status"] == "HALTED":
-            return
-
         if self.state["status"] == "IDLE":
-            logger.info(f"สถานะ IDLE กำลังวิเคราะห์ราคาปัจจุบัน: {current_price} THB")
-
-            if not self._has_enough_history():
-                logger.info("ข้อมูลราคาย้อนหลังยังไม่ครบ 2 ชั่วโมง รอสะสมข้อมูลต่อ")
+            logger.info(f"[{self.symbol}] สถานะ IDLE กำลังวิเคราะห์ราคาปัจจุบัน: {current_price} THB")
+            signal = self.analyze_trend(current_price)
+            if not signal["should_buy"]:
                 return
-
-            price_1h_ago = self._price_at_offset(3600)
-            price_2h_ago = self._price_at_offset(7200)
-            price_3h_ago = self._price_at_offset(10800)
-
-            if price_1h_ago is None:
-                logger.info("ข้อมูลราคาบางช่วงขาดหาย (gap) รอรอบถัดไป")
-                return
-
-            direction, confidence = self._trend_confidence(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
-
-            logger.info(f"ทิศทาง 1ชม: {direction or 'flat'} (ยืนยัน {confidence}%)")
-
-            if direction == "down":
-                logger.info(f"⚠️ เห็นสัญญาณขาลง (ยืนยัน {confidence}%) — ข้ามรอบนี้ ไม่เข้าซื้อ")
-                return
-
-            MIN_CONFIDENCE_TO_BUY = 50  # ต้องมี 2ชม. หรือ 3ชม. ยืนยันทิศทางเดียวกันอย่างน้อย 1 ใน 2 (ปรับตัวเลขนี้ได้เลย)
-            if direction != "up" or confidence < MIN_CONFIDENCE_TO_BUY:
-                return
-
-            thb_free, _, has_pending = self.get_free_balance()
-            if has_pending:
-                logger.info("ข้ามการซื้อ: มีออเดอร์ค้างอยู่ในระบบ")
-                return
-            if thb_free <= self.MIN_ORDER_THB:
-                logger.info(f"เงินว่างไม่พอสำหรับซื้อขั้นต่ำ (คงเหลือ {thb_free:.2f} THB)")
-                return
-
-            rules = self.get_symbol_rules()
-            # อัตราเงินที่ใช้เข้าซื้อต่อไม้ ปรับได้จากหน้าเว็บ (self.trade_size_percent) ค่าเริ่มต้น 95%
-            buy_value = round(thb_free * (self.trade_size_percent / 100.0), 2)
-            order_res = self.execute_market_order(side=0, value=buy_value)
-
-            if not (order_res and order_res.get("code") == "0000"):
-                logger.warning(f"ยิงออเดอร์ซื้อล้มเหลว: {order_res}")
-                return
-
-            order_id = order_res["data"]["orderId"]
-            logger.info(f"✔ ส่งคำสั่งซื้อสำเร็จ Order ID: {order_id} กำลังยืนยันราคาจับคู่จริง...")
-
-            avg_price = self.confirm_fill_price(order_id)
-            if avg_price == 0.0:
-                avg_price = current_price
-                logger.warning("ยืนยันราคาจับคู่จริงไม่ได้ ใช้ราคาตลาด ณ ขณะนั้นแทน (ควรตรวจสอบ order ด้วยมือ)")
-
-            self._check_slippage(current_price, avg_price, "ซื้อ")
-
-            # --- [จุดที่แก้ไข] คำนวณหักค่าธรรมเนียมขาซื้อออกก่อนบันทึกจำนวนเหรียญจริง ---
-            fee_pct = self.estimate_roundtrip_fee_percent()
-            one_way_fee_factor = (fee_pct / 2) / 100  # หักเฉพาะค่าธรรมเนียมขาซื้อ (ครึ่งหนึ่งของ Roundtrip)
-
-            raw_qty = (buy_value / avg_price) * (1 - one_way_fee_factor)
-            estimated_qty = self._floor_to_increment(raw_qty, rules["quantity_increment"])
-
-            self.state.update({
-                "status": "HOLDING",
-                "entry_price": avg_price,
-                "highest_price": avg_price,
-                "quantity": estimated_qty,
-                "roundtrip_fee_percent": fee_pct,
-            })
-            self.save_state()
-
-            logger.info(f"🎉 ซื้อสำเร็จ ต้นทุนเฉลี่ย {avg_price} THB จำนวน {estimated_qty} "
-                        f"(ค่าธรรมเนียม round-trip โดยประมาณ {fee_pct:.3f}%)")
+            self.try_enter_position(current_price)
 
         elif self.state["status"] == "HOLDING":
             entry_price = self.state["entry_price"]
@@ -652,7 +764,7 @@ class InnovestXTradingBot:
             qty = self.state["quantity"]
             fee_pct = self.state.get("roundtrip_fee_percent", self.DEFAULT_ROUNDTRIP_FEE_PERCENT)
 
-            logger.info(f"สถานะ HOLDING ต้นทุน {entry_price} THB ราคาปัจจุบัน {current_price} THB")
+            logger.info(f"[{self.symbol}] สถานะ HOLDING ต้นทุน {entry_price} THB ราคาปัจจุบัน {current_price} THB")
 
             if current_price > highest_price:
                 self.state["highest_price"] = current_price
@@ -711,19 +823,30 @@ class InnovestXTradingBot:
         self._register_trade_result(pnl_thb)
 
     # ==================== Main loop ====================
+    def poll_price(self):
+        """ดึงราคาและบันทึกประวัติ — ใช้ตอนสแกนหลายเหรียญ"""
+        self.maybe_reconcile_periodically()
+        price = self.get_latest_price()
+        if price is not None:
+            self._record_price_tick(price)
+        return price
+
     def run_once(self):
         """รันหนึ่งรอบของ loop หลัก (ไม่ sleep) — เรียกจาก run() หรือจาก supervisor loop ใน __main__"""
         self.maybe_reconcile_periodically()
         self._maybe_reset_daily_counters()
 
-        if self.state["status"] == "HALTED":
-            logger.warning("⛔ บอทอยู่ในสถานะ HALTED จาก Circuit Breaker — เฝ้าดูอย่างเดียว ไม่ส่งคำสั่งใหม่")
+        price = self.get_latest_price()
+        if price is None:
+            return
+        self._record_price_tick(price)
+
+        risk = load_shared_risk()
+        if risk.get("status") == "HALTED" and self.state.get("status") != "HOLDING":
+            logger.warning(f"[{self.symbol}] ⛔ บัญชีถูก HALTED จาก Circuit Breaker — ไม่เปิดออเดอร์ซื้อใหม่")
             return
 
-        price = self.get_latest_price()
-        if price is not None:
-            self._record_price_tick(price)
-            self.run_strategy(price)
+        self.run_strategy(price)
 
     def run(self, poll_interval_sec=60):
         """เรียกใช้ตรงๆ ได้ถ้าไม่ต้องการ dashboard control (เทรดเหรียญเดียวตลอด ไม่มีปุ่มหยุด)"""
@@ -751,7 +874,7 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="refresh" content="30">
-<title>${symbol_display} Bot Dashboard</title>
+<title>Sentinel · เฝ้า ${watch_count} เหรียญ</title>
 <style>
   :root {
     --bg: #1E1C18; --card: #2A2822; --border: #3D3A32;
@@ -766,7 +889,7 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
     -webkit-font-smoothing:antialiased; min-height:100vh;
     display:flex; justify-content:center; padding:0 0 40px; }
   .app { width:100%; max-width:480px; }
-  
+
   .topbar { position:sticky; top:0; z-index:10; display:flex; align-items:center;
     justify-content:space-between; padding:18px 20px; background:rgba(42,40,34,0.95);
     backdrop-filter:blur(8px); border-bottom:1px solid var(--border); }
@@ -784,7 +907,7 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .status-holding .dot { animation:pulse 1.8s ease-in-out infinite; }
   @keyframes pulse { 0%,100%{opacity:1;transform:scale(1);} 50%{opacity:.45;transform:scale(.8);} }
   @media (prefers-reduced-motion:reduce){ .status-holding .dot{animation:none;} }
-  
+
   .hero { padding:32px 24px 20px; text-align:center; }
   .hero-label { font-size:13px; color:var(--text-soft); font-weight:500; }
   .hero-price { font-size:clamp(34px,9vw,44px); font-weight:800; letter-spacing:-0.02em;
@@ -795,23 +918,23 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .hero-delta.positive { color:var(--green); background:var(--green-soft); }
   .hero-delta.negative { color:var(--red); background:var(--red-soft); }
   .hero-sub { margin-top:10px; font-size:13px; color:var(--text-soft); }
-  
+
   .banner { margin:0 20px 12px; padding:12px 14px; border-radius:12px; font-size:13px;
     font-weight:600; line-height:1.5; }
   .banner-danger { background:var(--red-soft); color:var(--red); }
   .banner-info { background:var(--accent-soft); color:var(--accent); }
   .banner-warning { background:#3D3420; color:#E8C468; }
-  
+
   .progress-card { margin:0 20px 16px; background:var(--card); border:1px solid var(--border);
     border-radius:16px; padding:14px 16px; }
   .progress-label { font-size:12px; color:var(--text-soft); font-weight:600; }
   .progress-bar { margin-top:8px; height:8px; border-radius:999px; background:#33312A; overflow:hidden; }
-  .progress-fill { height:100%; background:var(--accent); border-radius:999px; transition:width .3s ease; }
+  .progress-fill { height:100%; background:var(--accent); border-radius:999px; }
   .progress-sub { margin-top:6px; font-size:12px; color:var(--text-soft); }
-  
+
   .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:0 20px; }
   .card { background:var(--card); border:1px solid var(--border); border-radius:16px;
-    padding:14px 16px; box-shadow:0 1px 2px rgba(43,40,34,.03); }
+    padding:14px 16px; }
   .card-label { font-size:12px; color:var(--text-soft); font-weight:500; }
   .card-value { font-size:17px; font-weight:700; margin-top:4px; font-variant-numeric:tabular-nums;
     letter-spacing:-0.01em; }
@@ -819,53 +942,67 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .card-value.negative { color:var(--red); }
   .card-value.accent { color:var(--accent); }
   .card-sub { font-size:11px; color:var(--text-soft); margin-top:2px; }
-  
-  /* ===== ส่วนควบคุมบอท (จุดที่แก้ใหม่ทั้งหมด) ===== */
+
+  .coin-list { display:flex; flex-direction:column; gap:10px; padding:16px 20px 0; }
+  .coin-card { background:var(--card); border:1px solid var(--border); border-radius:16px; padding:14px 16px; }
+  .coin-card.is-holding { border-color:#3A5344; }
+  .coin-head { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+  .coin-sym { font-size:15px; font-weight:700; letter-spacing:0.02em; }
+  .coin-price { font-size:15px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .coin-meta { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .chip { font-size:11px; font-weight:600; padding:3px 8px; border-radius:999px; background:#33312A; color:var(--text-soft); }
+  .chip.up { background:var(--green-soft); color:var(--green); }
+  .chip.down { background:var(--red-soft); color:var(--red); }
+  .chip.hold { background:var(--green-soft); color:var(--green); }
+  .coin-sub { margin-top:8px; font-size:12px; color:var(--text-soft); line-height:1.45; }
+
   .control { margin:28px 20px 0; }
   .control-heading { display:flex; align-items:baseline; justify-content:space-between;
     margin-bottom:14px; padding:0 2px; }
   .control-title { font-size:15px; font-weight:700; }
   .control-heading-sub { font-size:12px; color:var(--text-soft); }
-  
+
   .control-card { background:var(--card); border:1px solid var(--border); border-radius:16px;
     padding:16px; margin-bottom:12px; }
   .control-card:last-child { margin-bottom:0; }
   .control-card.halted { border-color:var(--red);
     background:linear-gradient(180deg, var(--red-soft), var(--card) 60%); }
-  
+
   .toggle-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-  
-  .control-icon { display:inline-flex; width:26px; height:26px; align-items:center;
-    justify-content:center; border-radius:8px; background:var(--accent-soft);
-    color:var(--accent); font-size:13px; margin-right:8px; flex-shrink:0; }
   .label-row { display:flex; align-items:center; }
   .control-label { font-size:13px; font-weight:600; color:var(--text); }
   .control-sub { font-size:12px; color:var(--text-soft); margin-top:5px; line-height:1.5; }
-  
+
+  .watch-list { display:flex; flex-direction:column; gap:8px; margin-top:12px; }
+  .watch-row { display:flex; align-items:center; justify-content:space-between; gap:8px;
+    padding:10px 12px; background:var(--bg); border:1px solid var(--border); border-radius:12px; }
+  .watch-sym { font-size:13px; font-weight:700; letter-spacing:0.03em; }
+  .watch-meta { font-size:11px; color:var(--text-soft); margin-top:2px; }
+
   .symbol-input { width:100%; margin-top:10px; padding:10px 12px; border:1px solid var(--border);
     border-radius:10px; font-size:14px; font-weight:600; letter-spacing:.02em;
     text-transform:uppercase; background:var(--bg); color:var(--text); }
   .symbol-input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
-  
+
   .quick-picks { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
   .pick { font-size:11px; font-weight:600; color:var(--text-soft); background:var(--bg);
-    border:1px solid var(--border); border-radius:999px; padding:4px 9px; cursor:pointer; }
+    border:1px solid var(--border); border-radius:999px; padding:6px 10px; cursor:pointer; }
   .pick:hover { border-color:var(--accent); color:var(--accent); }
-  
+
   .field-row { display:flex; align-items:center; gap:8px; margin-top:12px; }
   .password-input { flex:1; min-width:0; padding:10px 12px; border:1px solid var(--border);
     border-radius:10px; font-size:13px; background:var(--bg); color:var(--text); }
   .password-input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
-  
+
   .btn { border:none; border-radius:10px; padding:10px 16px; font-size:13px; font-weight:700;
-    cursor:pointer; white-space:nowrap; flex-shrink:0; transition:filter .15s ease; }
+    cursor:pointer; white-space:nowrap; flex-shrink:0; }
   .btn:hover { filter:brightness(1.08); }
-  .btn:active { filter:brightness(0.92); }
+  .btn:disabled { opacity:.45; cursor:not-allowed; }
   .btn-accent { background:var(--accent); color:#fff; }
   .btn-neutral { background:#33312A; color:var(--text); }
   .btn-danger { background:var(--red); color:#fff; }
-  .btn-sm { padding:8px 14px; font-size:12px; }
-  
+  .btn-sm { padding:8px 12px; font-size:12px; }
+
   footer { display:flex; align-items:center; justify-content:center; gap:8px; margin-top:20px;
     font-size:12px; color:var(--text-soft); }
   .sep { opacity:.5; }
@@ -879,13 +1016,13 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
         <svg class="spark" viewBox="0 0 24 24"><path d="M12 0c.6 3.8 2.2 6.4 5 8.2 2.8 1.8 5.4 2 7 2-1.6 0-4.2.2-7 2C14.2 14 12.6 16.6 12 20.4c-.6-3.8-2.2-6.4-5-8.2-2.8-1.8-5.4-2-7-2 1.6 0 4.2-.2 7-2C9.8 6.4 11.4 3.8 12 0z"/></svg>
         <div>
           <div class="brand-title">Sentinel</div>
-          <div class="brand-sub">${symbol_display} · Price Action 3H</div>
+          <div class="brand-sub">เฝ้า ${watch_count} เหรียญ · Price Action 3H</div>
         </div>
       </div>
       <div class="status-pill ${status_class}"><span class="dot"></span> ${status_label}</div>
     </header>
     <section class="hero">
-      <div class="hero-label">ราคาปัจจุบัน (${symbol_display})</div>
+      <div class="hero-label">${hero_label}</div>
       <div class="hero-price">${hero_price}</div>
       ${hero_delta_html}
       ${freshness_html}
@@ -895,6 +1032,7 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
     <div class="grid">
       ${cards_html}
     </div>
+    ${coin_cards_html}
 <section class="control">
 
 <div class="control-heading">
@@ -915,34 +1053,42 @@ ${password_field_html}
 </div>
 </form>
 
-<form class="control-card" method="POST" action="/control/symbol">
-<div class="label-row"><span class="control-icon">🪙</span>
-<div class="control-label">เหรียญที่เทรด (กำลังรัน: ${running_symbol})</div>
-</div>
-<input class="symbol-input" type="text" name="symbol" value="${symbol_input_value}"
+<form class="control-card" method="POST" action="/control/watchlist/add">
+<div class="control-label">เหรียญที่ให้บอทเฝ้า</div>
+<div class="control-sub">พิมพ์คู่เหรียญแล้วกดเพิ่ม บอทจะดูทุกตัวในรายการด้วยเกณฑ์ขาขึ้น/ลงแบบเดิม
+เมื่อขายไม้เก่าแล้ว จะไปมองหาเหรียญถัดไปที่คุณเพิ่มไว้ให้เอง</div>
+${watchlist_rows_html}
+<input class="symbol-input" type="text" name="symbol" placeholder="เช่น ETHTHB"
 autocapitalize="characters" autocomplete="off">
 <div class="quick-picks">
-<span class="pick" onclick="document.querySelector('.symbol-input').value='BTCTHB'">BTCTHB</span>
-<span class="pick" onclick="document.querySelector('.symbol-input').value='ETHTHB'">ETHTHB</span>
-<span class="pick" onclick="document.querySelector('.symbol-input').value='XRPTHB'">XRPTHB</span>
-<span class="pick" onclick="document.querySelector('.symbol-input').value='USDTTHB'">USDTTHB</span>
+<button type="submit" class="pick" name="symbol" value="BTCTHB">BTCTHB</button>
+<button type="submit" class="pick" name="symbol" value="ETHTHB">ETHTHB</button>
+<button type="submit" class="pick" name="symbol" value="XRPTHB">XRPTHB</button>
+<button type="submit" class="pick" name="symbol" value="SOLTHB">SOLTHB</button>
 </div>
-<div class="control-sub">พิมพ์คู่เหรียญตามที่ InnovestX รองรับ (ตัวพิมพ์ใหญ่)
-เปลี่ยนได้จริงเมื่อบอทไม่ได้ถือโพซิชันอยู่เท่านั้น</div>
 <div class="field-row">
 ${password_field_html}
-<button type="submit" class="btn btn-accent">เปลี่ยนเหรียญ</button>
+<button type="submit" class="btn btn-accent">เพิ่มเหรียญ</button>
+</div>
+</form>
+
+<form class="control-card" method="POST" action="/control/max_positions">
+<div class="control-label">ถือได้พร้อมกันกี่เหรียญ (กำลังตั้ง: ${max_open_positions} ช่อง)</div>
+<input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="10"
+name="max_open_positions" value="${max_open_positions}">
+<div class="control-sub">${size_hint_html}</div>
+<div class="field-row">
+${password_field_html}
+<button type="submit" class="btn btn-accent">บันทึกค่า</button>
 </div>
 </form>
 
 <form class="control-card" method="POST" action="/control/trade_size">
-<div class="label-row"><span class="control-icon">💰</span>
 <div class="control-label">อัตราเงินที่ใช้เข้าซื้อต่อไม้ (กำลังตั้ง: ${trade_size_percent}% ของเงินว่าง)</div>
-</div>
 <input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="100"
 name="trade_size_percent" value="${trade_size_percent}">
-<div class="control-sub">เช่น ตั้ง 50 = ใช้เงินบาทว่างครึ่งหนึ่งเข้าซื้อทุกครั้งที่มีสัญญาณ
-ที่เหลือจะไม่ถูกแตะ</div>
+<div class="control-sub">ถ้าอยากถือ ${max_open_positions} เหรียญพร้อมกัน แนะนำตั้งประมาณ ${suggested_trade_size}%
+ต่อไม้ ไม่งั้นไม้แรกจะกินเงินเกือบหมด</div>
 <div class="field-row">
 ${password_field_html}
 <button type="submit" class="btn btn-accent">บันทึกค่า</button>
@@ -950,12 +1096,10 @@ ${password_field_html}
 </form>
 
 <form class="control-card" method="POST" action="/control/max_losses">
-<div class="label-row"><span class="control-icon">🛑</span>
 <div class="control-label">ขาดทุนติดกันกี่ไม้ถึงหยุด (กำลังตั้ง: ${max_consecutive_losses} ไม้)</div>
-</div>
 <input class="symbol-input" style="text-transform:none;" type="number" step="1" min="1" max="20"
 name="max_consecutive_losses" value="${max_consecutive_losses}">
-<div class="control-sub">ถ้าขาดทุนติดต่อกันครบจำนวนนี้ บอทจะหยุดเทรด (HALTED) ทันที</div>
+<div class="control-sub">นับรวมทุกเหรียญในบัญชี ถ้าขาดทุนติดกันครบจำนวนนี้ จะหยุดเปิดไม้ใหม่</div>
 <div class="field-row">
 ${password_field_html}
 <button type="submit" class="btn btn-accent">บันทึกค่า</button>
@@ -963,13 +1107,10 @@ ${password_field_html}
 </form>
 
 <form class="control-card" method="POST" action="/control/risk">
-<div class="label-row"><span class="control-icon">⚠️</span>
 <div class="control-label">ขาดทุนสูงสุดที่ยอมรับต่อวัน (กำลังตั้ง: ${max_daily_loss_percent}%)</div>
-</div>
 <input class="symbol-input" style="text-transform:none;" type="number" step="0.1" min="0.1" max="100"
 name="max_daily_loss_percent" value="${max_daily_loss_percent}">
-<div class="control-sub">ถ้าขาดทุนสะสมวันนี้ถึง % นี้ บอทจะหยุดเทรดอัตโนมัติ (HALTED)
-จนกว่าจะข้ามวันใหม่ หรือปลดล็อกเอง</div>
+<div class="control-sub">ถ้าขาดทุนสะสมวันนี้ถึง % นี้ บอทจะหยุดเปิดไม้ใหม่ (โพซิชันที่ถืออยู่ยังถูกดูแลต่อ)</div>
 <div class="field-row">
 ${password_field_html}
 <button type="submit" class="btn btn-accent">บันทึกค่า</button>
@@ -994,73 +1135,132 @@ def _fmt_thb(value):
         return "0.00"
 
 
+def _display_symbol(symbol):
+    symbol = symbol or ""
+    if symbol.endswith("THB") and len(symbol) > 3:
+        return f"{symbol[:-3]}/{symbol[-3:]}"
+    return symbol
+
+
 def _render_card(label, value, sub="", value_class=""):
     sub_html = f'<div class="card-sub">{sub}</div>' if sub else ""
     return f'<div class="card"><div class="card-label">{label}</div><div class="card-value {value_class}">{value}</div>{sub_html}</div>'
 
 
-def render_dashboard(running_symbol, state, control):
-    state = state or {}
-    status = state.get("status", "IDLE")
-    entry_price = float(state.get("entry_price", 0.0) or 0.0)
-    highest_price = float(state.get("highest_price", 0.0) or 0.0)
-    quantity = float(state.get("quantity", 0.0) or 0.0)
-    fee_pct = float(state.get("roundtrip_fee_percent", InnovestXTradingBot.DEFAULT_ROUNDTRIP_FEE_PERCENT) or 0.0)
-    daily_pnl = float(state.get("daily_realized_pnl", 0.0) or 0.0)
-    daily_start = float(state.get("daily_start_balance", 0.0) or 0.0)
-    consecutive_losses = int(state.get("consecutive_losses", 0) or 0)
-    price_history = state.get("price_history", []) or []
-    current_price = price_history[-1][1] if price_history else None
-    last_price_ts = price_history[-1][0] if price_history else None
-
+def _trend_from_state(state):
+    """เกณฑ์เดียวกับบอท: ทิศทางจาก 1 ชม. แล้วให้คะแนน 2ชม./3ชม. ชม.ละ 50%"""
+    history = state.get("price_history") or []
+    if not history:
+        return None, 0, None, 0.0, 0.0
+    current = history[-1][1]
     now = time.time()
-    price_age_sec = (now - last_price_ts) if last_price_ts is not None else None
-    PRICE_STALE_THRESHOLD_SEC = 150  # เกิน ~2.5 เท่าของ poll interval (60วิ) ถือว่าเก่าเกินไป น่าสงสัย
 
+    def price_at(seconds_ago, tolerance=300):
+        target = now - seconds_ago
+        closest = min(history, key=lambda t: abs(t[0] - target))
+        if abs(closest[0] - target) > tolerance:
+            return None
+        return closest[1]
+
+    p1 = price_at(3600)
+    p2 = price_at(7200)
+    p3 = price_at(10800)
+    elapsed = max(0.0, now - history[0][0])
+    if current is None or p1 is None or current == p1:
+        return None, 0, current, 0.0, elapsed
+    direction = "up" if current > p1 else "down"
+    confidence = 0
+    if p2 is not None:
+        if (direction == "up" and p1 > p2) or (direction == "down" and p1 < p2):
+            confidence += 50
+    if p2 is not None and p3 is not None:
+        if (direction == "up" and p2 > p3) or (direction == "down" and p2 < p3):
+            confidence += 50
+    change_1h = (current - p1) / p1 * 100
+    return direction, confidence, current, change_1h, elapsed
+
+
+def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
+    watchlist = watchlist or []
+    states_by_symbol = states_by_symbol or {}
+    shared_risk = shared_risk or {}
+    now = time.time()
+    PRICE_STALE_THRESHOLD_SEC = 150
+
+    daily_pnl = float(shared_risk.get("daily_realized_pnl", 0.0) or 0.0)
+    daily_start = float(shared_risk.get("daily_start_balance", 0.0) or 0.0)
+    consecutive_losses = int(shared_risk.get("consecutive_losses", 0) or 0)
+    account_halted = shared_risk.get("status") == "HALTED"
     active_max_consecutive_losses = control.get("max_consecutive_losses", InnovestXTradingBot.MAX_CONSECUTIVE_LOSSES)
+    max_open = int(control.get("max_open_positions", InnovestXTradingBot.DEFAULT_MAX_OPEN_POSITIONS) or 3)
 
-    # ---- status pill ----
-    status_map = {
-        "HOLDING": ("status-holding", "HOLDING"),
-        "HALTED": ("status-halted", "HALTED"),
-    }
-    status_class, status_label = status_map.get(status, ("status-idle", "IDLE"))
+    holding_symbols = []
+    newest_ts = None
+    total_unrealized = 0.0
+    waiting_history = 0
 
-    # ---- hero ----
-    if current_price is not None:
-        whole, _, dec = f"{current_price:,.2f}".partition(".")
-        hero_price = f"฿{whole}<span class=\"hero-decimal\">.{dec}</span>"
+    for sym in watchlist:
+        st = states_by_symbol.get(sym) or {}
+        if st.get("status") == "HOLDING":
+            holding_symbols.append(sym)
+            hist = st.get("price_history") or []
+            px = hist[-1][1] if hist else None
+            entry = float(st.get("entry_price", 0.0) or 0.0)
+            qty = float(st.get("quantity", 0.0) or 0.0)
+            if px is not None and entry:
+                total_unrealized += qty * (px - entry)
+        hist = st.get("price_history") or []
+        if hist:
+            ts = hist[-1][0]
+            if newest_ts is None or ts > newest_ts:
+                newest_ts = ts
+            if (now - hist[0][0]) < 7200 and st.get("status") != "HOLDING":
+                waiting_history += 1
+        elif st.get("status") != "HOLDING":
+            waiting_history += 1
+
+    holding_count = len(holding_symbols)
+    if account_halted:
+        status_class, status_label = "status-halted", "HALTED"
+    elif holding_count:
+        status_class, status_label = "status-holding", f"HOLDING {holding_count}"
     else:
-        hero_price = "฿---"
+        status_class, status_label = "status-idle", "SCANNING"
 
-    # ---- ความสดของราคา (แยกจากเวลา render หน้า) ----
+    hero_label = f"ถืออยู่ {holding_count} / {max_open} ช่อง"
+    hero_price = f'{holding_count}<span class="hero-decimal">/{max_open}</span>'
+    if holding_count:
+        sign = "+" if total_unrealized >= 0 else ""
+        cls = "positive" if total_unrealized >= 0 else "negative"
+        names = ", ".join(_display_symbol(s) for s in holding_symbols)
+        hero_delta_html = (
+            f'<div class="hero-delta {cls}">{sign}{_fmt_thb(total_unrealized)} ฿ ยังไม่ขาย</div>'
+            f'<div class="hero-sub">ถืออยู่: {names}</div>'
+        )
+    else:
+        hero_delta_html = '<div class="hero-sub">รอสัญญาณขาขึ้นจากเหรียญในรายการ...</div>'
+
     freshness_html = ""
+    price_age_sec = (now - newest_ts) if newest_ts is not None else None
     if price_age_sec is not None:
         age_min = int(price_age_sec // 60)
         age_sec = int(price_age_sec % 60)
         age_text = f"{age_min} นาที {age_sec} วิ" if age_min > 0 else f"{age_sec} วิ"
         if price_age_sec > PRICE_STALE_THRESHOLD_SEC:
-            freshness_html = f'<div class="hero-delta negative">⚠️ ราคาอาจไม่สด — ดึงมาเมื่อ {age_text} ที่แล้ว</div>'
+            freshness_html = f'<div class="hero-delta negative">ราคาอาจไม่สด — ดึงมาเมื่อ {age_text} ที่แล้ว</div>'
         else:
             freshness_html = f'<div class="hero-sub">อัปเดตราคาเมื่อ {age_text} ที่แล้ว</div>'
 
-    hero_delta_html = ""
-    if status == "HOLDING" and entry_price > 0 and current_price is not None:
-        delta_pct = (current_price - entry_price) / entry_price * 100
-        cls = "positive" if delta_pct >= 0 else "negative"
-        arrow = "▲" if delta_pct >= 0 else "▼"
-        hero_delta_html = f'<div class="hero-delta {cls}">{arrow} {delta_pct:+.2f}% จากต้นทุน</div>'
-    elif status == "IDLE":
-        hero_delta_html = '<div class="hero-sub">รอสัญญาณเข้าซื้อ...</div>'
-
-    # ---- banners ----
     banners = []
     if price_age_sec is not None and price_age_sec > PRICE_STALE_THRESHOLD_SEC:
         age_min = int(price_age_sec // 60)
-        banners.append(f'<div class="banner banner-danger">⚠️ ราคาที่แสดงอาจไม่ใช่ราคาสด (เก่าไปแล้ว {age_min}+ นาที) — ตรวจสอบ log บน Render ว่าดึงราคาล้มเหลวซ้ำๆ หรือไม่</div>')
+        banners.append(
+            f'<div class="banner banner-danger">ราคาที่แสดงอาจไม่ใช่ราคาสด (เก่าไปแล้ว {age_min}+ นาที) '
+            f"— ตรวจสอบ log บน Render ว่าดึงราคาล้มเหลวซ้ำๆ หรือไม่</div>"
+        )
 
     reason = ""
-    if status == "HALTED":
+    if account_halted:
         active_threshold = control.get("max_daily_loss_percent", InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT)
         daily_loss_percent = -daily_pnl / daily_start * 100 if daily_start > 0 else 0.0
         if daily_loss_percent >= active_threshold:
@@ -1069,105 +1269,196 @@ def render_dashboard(running_symbol, state, control):
             reason = f"ขาดทุนติดกัน {consecutive_losses} ไม้ ครบเพดาน {active_max_consecutive_losses} ไม้"
         else:
             reason = "Circuit breaker ทำงาน (ดูรายละเอียดใน log)"
-        banners.append(f'<div class="banner banner-danger">🛑 บอทหยุดเทรดชั่วคราว — {reason} (ปลดล็อกอัตโนมัติวันถัดไป หรือกดปลดล็อกเองด้านล่าง)</div>')
+        banners.append(
+            f'<div class="banner banner-danger">บอทหยุดเปิดไม้ใหม่ — {reason} '
+            f"(โพซิชันที่ถืออยู่ยังถูกดูแลต่อ / ปลดล็อกอัตโนมัติวันถัดไป หรือกดปลดล็อกด้านล่าง)</div>"
+        )
 
     if control.get("paused"):
-        banners.append('<div class="banner banner-info">⏸ บอทหยุดเทรดชั่วคราว (สั่งจากหน้านี้) — จะไม่เปิดออเดอร์ใหม่จนกว่าจะกด "เริ่มเทรดต่อ"</div>')
+        banners.append(
+            '<div class="banner banner-info">บอทหยุดเทรดชั่วคราว (สั่งจากหน้านี้) '
+            "— จะไม่เปิดออเดอร์ใหม่จนกว่าจะกด เริ่มเทรดต่อ</div>"
+        )
 
-    if control.get("active_symbol") != running_symbol:
-        banners.append(f'<div class="banner banner-info">🔄 คำขอเปลี่ยนเหรียญเป็น {control.get("active_symbol")} กำลังรออยู่ — จะเปลี่ยนทันทีหลังขายโพซิชัน {running_symbol} เสร็จ</div>')
+    pending_remove = [
+        s for s in (RUNNING_WATCHLIST.get("value") or [])
+        if s not in watchlist
+    ]
+    if pending_remove:
+        banners.append(
+            f'<div class="banner banner-info">กำลังรอขายก่อนเอาออกจากรายการ: '
+            f"{', '.join(_display_symbol(s) for s in pending_remove)}</div>"
+        )
 
     if not os.environ.get("DASHBOARD_PASSWORD"):
-        banners.append('<div class="banner banner-warning">⚠️ หน้านี้ยังไม่มีรหัสผ่านป้องกัน ใครมีลิงก์นี้ก็สั่งหยุด/เปลี่ยนเหรียญได้ — แนะนำตั้งค่า DASHBOARD_PASSWORD ใน Environment Variables ของ Render</div>')
+        banners.append(
+            '<div class="banner banner-warning">หน้านี้ยังไม่มีรหัสผ่านป้องกัน '
+            "ใครมีลิงก์นี้ก็สั่งหยุด/เพิ่มเหรียญได้ — แนะนำตั้งค่า DASHBOARD_PASSWORD ใน Render</div>"
+        )
 
     banners_html = "".join(banners)
 
-    # ---- progress bar (สะสมข้อมูล 2 ชม.) ----
     progress_html = ""
-    if status == "IDLE":
-        if price_history:
-            elapsed = max(0.0, now - price_history[0][0])
-        else:
-            elapsed = 0.0
-        if elapsed < 7200:
-            pct = min(100, elapsed / 7200 * 100)
-            minutes_done = int(elapsed // 60)
+    if waiting_history and holding_count == 0:
+        # แสดงความคืบหน้าของเหรียญที่ช้าที่สุด
+        slowest_elapsed = 7200
+        slowest_has_hist = False
+        for sym in watchlist:
+            st = states_by_symbol.get(sym) or {}
+            hist = st.get("price_history") or []
+            if hist:
+                slowest_has_hist = True
+                slowest_elapsed = min(slowest_elapsed, max(0.0, now - hist[0][0]))
+            else:
+                slowest_elapsed = 0.0
+                slowest_has_hist = False
+                break
+        if slowest_elapsed < 7200:
+            pct = min(100, slowest_elapsed / 7200 * 100)
+            minutes_done = int(slowest_elapsed // 60)
             minutes_left = max(0, 120 - minutes_done)
-            sub = f"{minutes_done} / 120 นาที · เหลืออีกประมาณ {minutes_left} นาที" if price_history else \
-                "ยังไม่มีข้อมูลราคาเลย รอรอบแรกของบอท (ทุก 60 วินาที)"
+            sub = (
+                f"{minutes_done} / 120 นาที · เหลืออีกประมาณ {minutes_left} นาที "
+                f"({waiting_history} เหรียญยังไม่ครบข้อมูล)"
+                if slowest_has_hist else
+                "ยังไม่มีข้อมูลราคาเลย รอรอบแรกของบอท"
+            )
             progress_html = (
                 '<section class="progress-card">'
-                '<div class="progress-label">กำลังสะสมข้อมูลราคา (ต้องครบ 2 ชั่วโมงก่อนเริ่มวิเคราะห์สัญญาณซื้อ)</div>'
+                '<div class="progress-label">กำลังสะสมข้อมูลราคา (ต้องครบ 2 ชั่วโมงต่อเหรียญก่อนเริ่มซื้อ)</div>'
                 f'<div class="progress-bar"><div class="progress-fill" style="width:{pct:.0f}%"></div></div>'
                 f'<div class="progress-sub">{sub}</div>'
-                '</section>'
+                "</section>"
             )
 
-    # ---- cards ----
-    cards = []
-    if status == "HOLDING":
-        unrealized = quantity * (current_price - entry_price) if current_price is not None else 0.0
-        unrealized_pct = (current_price - entry_price) / entry_price * 100 if entry_price > 0 and current_price is not None else 0.0
-        cards.append(_render_card("กำไร/ขาดทุน (ยังไม่ขาย)", f"{'+' if unrealized >= 0 else ''}{_fmt_thb(unrealized)} ฿",
-                                   sub=f"{unrealized_pct:+.2f}%", value_class="positive" if unrealized >= 0 else "negative"))
-        cards.append(_render_card("ต้นทุนเฉลี่ย", f"{_fmt_thb(entry_price)} ฿"))
-        cards.append(_render_card("จุดสูงสุดตั้งแต่ถือ", f"{_fmt_thb(highest_price)} ฿"))
-        cards.append(_render_card("ค่าธรรมเนียม (ประมาณ)", f"{fee_pct:.2f}%", value_class="accent"))
-        cards.append(_render_card("กำไรวันนี้ (รับรู้แล้ว)", f"{'+' if daily_pnl >= 0 else ''}{_fmt_thb(daily_pnl)} ฿",
-                                   value_class="positive" if daily_pnl >= 0 else "negative"))
-        cards.append(_render_card("ขาดทุนติดกัน", f"{consecutive_losses} / {active_max_consecutive_losses} ไม้"))
-    else:
-        cards.append(_render_card("กำไรวันนี้ (รับรู้แล้ว)", f"{'+' if daily_pnl >= 0 else ''}{_fmt_thb(daily_pnl)} ฿",
-                                   value_class="positive" if daily_pnl >= 0 else "negative"))
-        cards.append(_render_card("ทุนเริ่มต้นวันนี้", f"{_fmt_thb(daily_start)} ฿"))
-        cards.append(_render_card("ขาดทุนติดกัน", f"{consecutive_losses} / {active_max_consecutive_losses} ไม้"))
-        cards.append(_render_card("ค่าธรรมเนียม (ประมาณล่าสุด)", f"{fee_pct:.2f}%", value_class="accent"))
-
+    cards = [
+        _render_card(
+            "กำไรวันนี้ (รับรู้แล้ว)",
+            f"{'+' if daily_pnl >= 0 else ''}{_fmt_thb(daily_pnl)} ฿",
+            value_class="positive" if daily_pnl >= 0 else "negative",
+        ),
+        _render_card("ทุนเริ่มต้นวันนี้", f"{_fmt_thb(daily_start)} ฿"),
+        _render_card("ขาดทุนติดกัน", f"{consecutive_losses} / {active_max_consecutive_losses} ไม้"),
+        _render_card("เหรียญในรายการ", f"{len(watchlist)} ตัว", sub=f"ถือได้สูงสุด {max_open} ช่อง", value_class="accent"),
+    ]
     cards_html = "".join(cards)
 
-    # ---- control panel state ----
-    if control.get("paused"):
-        pause_sub = "ตอนนี้: หยุดอยู่ (ไม่เปิดออเดอร์ใหม่)"
-        pause_btn_class = "btn-accent"
-        pause_btn_label = "▶ เริ่มเทรดต่อ"
-    else:
-        pause_sub = "ตอนนี้: กำลังทำงานปกติ"
-        pause_btn_class = "btn-neutral"
-        pause_btn_label = "⏸ หยุดชั่วคราว"
+    coin_parts = ['<div class="coin-list">']
+    if not watchlist:
+        coin_parts.append(
+            '<div class="coin-card"><div class="coin-sub">ยังไม่มีเหรียญในรายการ — เพิ่มด้านล่างได้เลย</div></div>'
+        )
+    for sym in watchlist:
+        st = states_by_symbol.get(sym) or {}
+        status = st.get("status", "IDLE")
+        direction, confidence, current, change_1h, elapsed = _trend_from_state(st)
+        holding_cls = " is-holding" if status == "HOLDING" else ""
+        price_txt = f"{_fmt_thb(current)} ฿" if current is not None else "—"
+        chips = []
+        if status == "HOLDING":
+            chips.append('<span class="chip hold">ถืออยู่</span>')
+            entry = float(st.get("entry_price", 0.0) or 0.0)
+            if current is not None and entry:
+                d = (current - entry) / entry * 100
+                chips.append(f'<span class="chip {"up" if d >= 0 else "down"}">{d:+.2f}% จากต้นทุน</span>')
+        else:
+            chips.append('<span class="chip" >เฝ้าอยู่</span>')
+        if direction == "up":
+            chips.append(f'<span class="chip up">ขาขึ้น {confidence}%</span>')
+        elif direction == "down":
+            chips.append(f'<span class="chip down">ขาลง {confidence}%</span>')
+        if elapsed and elapsed < 7200 and status != "HOLDING":
+            chips.append(f'<span class="chip">รอข้อมูล {int(elapsed // 60)}/120 นาที</span>')
+        if change_1h:
+            chips.append(f'<span class="chip {"up" if change_1h >= 0 else "down"}">1 ชม. {change_1h:+.2f}%</span>')
+        sub = "เกณฑ์เดิม: ขาขึ้น + ยืนยันอย่างน้อย 50% ถึงเข้าซื้อ"
+        if status == "HOLDING":
+            sub = f"ต้นทุน {_fmt_thb(float(st.get('entry_price', 0) or 0))} ฿ · ดูแลด้วย trailing / stop loss แบบเดิม"
+        coin_parts.append(
+            f'<article class="coin-card{holding_cls}">'
+            f'<div class="coin-head"><div class="coin-sym">{_display_symbol(sym)}</div>'
+            f'<div class="coin-price">{price_txt}</div></div>'
+            f'<div class="coin-meta">{"".join(chips)}</div>'
+            f'<div class="coin-sub">{sub}</div>'
+            "</article>"
+        )
+    coin_parts.append("</div>")
+    coin_cards_html = "".join(coin_parts)
 
     password_field_html = ""
     if os.environ.get("DASHBOARD_PASSWORD"):
-        password_field_html = '<input class="password-input" type="password" name="password" placeholder="รหัส" style="margin-top:8px;">'
+        password_field_html = (
+            '<input class="password-input" type="password" name="password" placeholder="รหัส" style="margin-top:8px;">'
+        )
+
+    watch_rows = ['<div class="watch-list">']
+    for sym in watchlist:
+        st = states_by_symbol.get(sym) or {}
+        status = st.get("status", "IDLE")
+        holding = status == "HOLDING"
+        meta = "ถืออยู่ — ขายก่อนจึงเอาออกได้" if holding else "เฝ้าอยู่ รอสัญญาณขาขึ้น"
+        disabled = "disabled" if holding else ""
+        watch_rows.append(
+            '<div class="watch-row">'
+            f'<div><div class="watch-sym">{_display_symbol(sym)}</div>'
+            f'<div class="watch-meta">{meta}</div></div>'
+            f'<form method="POST" action="/control/watchlist/remove">'
+            f'<input type="hidden" name="symbol" value="{sym}">'
+            f"{password_field_html}"
+            f'<button type="submit" class="btn btn-sm btn-neutral" {disabled}>เอาออก</button>'
+            "</form></div>"
+        )
+    if not watchlist:
+        watch_rows.append('<div class="watch-meta">ยังว่าง — เพิ่มเหรียญด้านล่าง</div>')
+    watch_rows.append("</div>")
+    watchlist_rows_html = "".join(watch_rows)
+
+    if control.get("paused"):
+        pause_sub = "ตอนนี้: หยุดอยู่ (ไม่เปิดออเดอร์ใหม่)"
+        pause_btn_class = "btn-accent"
+        pause_btn_label = "เริ่มเทรดต่อ"
+    else:
+        pause_sub = "ตอนนี้: กำลังสแกนเหรียญในรายการ"
+        pause_btn_class = "btn-neutral"
+        pause_btn_label = "หยุดชั่วคราว"
 
     last_updated = datetime.now().strftime("%H:%M:%S")
+    suggested = max(1, int(round(100.0 / max_open)))
+    size_hint_html = (
+        f"หลังขายไม้ใดไม้หนึ่ง ช่องจะว่าง แล้วบอทจะไปมองหาเหรียญอื่นในรายการต่อให้เอง"
+    )
 
     unlock_button_html = ""
-    if status == "HALTED":
+    if account_halted:
         unlock_button_html = f'''<form class="control-card halted" method="POST" action="/control/unlock">
-      <div class="control-label">บอทถูกล็อกอยู่ (HALTED)</div>
+      <div class="control-label">บอทถูกล็อกไม่ให้เปิดไม้ใหม่ (HALTED)</div>
         <div class="control-sub">{reason}</div>
         <div class="field-row">
       {password_field_html}
-      <button type="submit" class="btn btn-danger">🔓 ปลดล็อกตอนนี้</button>
+      <button type="submit" class="btn btn-danger">ปลดล็อกตอนนี้</button>
       </div>
     </form>'''
 
     return DASHBOARD_TEMPLATE.safe_substitute(
-        symbol_display=f"{running_symbol[:-3]}/{running_symbol[-3:]}" if running_symbol.endswith("THB") else running_symbol,
+        watch_count=str(len(watchlist)),
         status_class=status_class,
         status_label=status_label,
+        hero_label=hero_label,
         hero_price=hero_price,
         hero_delta_html=hero_delta_html,
         freshness_html=freshness_html,
         banners_html=banners_html,
         progress_html=progress_html,
         cards_html=cards_html,
+        coin_cards_html=coin_cards_html,
         unlock_button_html=unlock_button_html,
         pause_sub=pause_sub,
         pause_btn_class=pause_btn_class,
         pause_btn_label=pause_btn_label,
-        running_symbol=running_symbol,
-        symbol_input_value=control.get("active_symbol", running_symbol),
+        watchlist_rows_html=watchlist_rows_html,
+        max_open_positions=max_open,
+        suggested_trade_size=suggested,
+        size_hint_html=size_hint_html,
         max_daily_loss_percent=control.get("max_daily_loss_percent", InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT),
         trade_size_percent=control.get("trade_size_percent", InnovestXTradingBot.DEFAULT_TRADE_SIZE_PERCENT),
         max_consecutive_losses=active_max_consecutive_losses,
@@ -1179,15 +1470,14 @@ def render_dashboard(running_symbol, state, control):
 # ==================== Web Service (หน้าเว็บสถานะ + ควบคุมบอท สำหรับ Render) ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        pass  # กัน log ของ http.server เองไปปนกับ log ของบอท (คำขอ GET ทุกครั้งไม่จำเป็นต้องขึ้น log)
-    
+        pass
+
     def do_HEAD(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
 
     def do_GET(self):
-        # 1. เพิ่มส่วนนี้: ถ้า UptimeRobot ยิงมาที่ /health ให้ตอบ OK สั้นๆ กลับไปทันที
         if self.path == "/health":
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -1195,12 +1485,19 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"OK")
             return
 
-        # 2. ส่วนเดิม: สำหรับการเข้าดูหน้า Dashboard ผ่านเบราว์เซอร์ปกติ
         try:
-            running_symbol = RUNNING_SYMBOL["value"] or DEFAULT_SYMBOL
-            state = db.reference(f"bots/{running_symbol}/state").get() or {}
             control = load_control()
-            html = render_dashboard(running_symbol, state, control)
+            watchlist = list(control.get("watchlist") or [])
+            # แสดงทั้งที่เฝ้าอยู่ และที่รอขายก่อนเอาออก
+            visible = list(dict.fromkeys(watchlist + list(RUNNING_WATCHLIST.get("value") or [])))
+            states = {}
+            for sym in visible:
+                try:
+                    states[sym] = db.reference(f"bots/{sym}/state").get() or {}
+                except Exception:
+                    states[sym] = {}
+            shared_risk = load_shared_risk()
+            html = render_dashboard(watchlist, states, control, shared_risk)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
@@ -1234,15 +1531,46 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 save_control(control)
                 logger.info(f"[เว็บควบคุม] ตั้งค่า paused={control['paused']}")
 
-            elif self.path == "/control/symbol":
-                requested = fields.get("symbol", [""])[0].strip().upper()
-                if re.match(r"^[A-Z0-9]{2,20}$", requested):
+            elif self.path in ("/control/symbol", "/control/watchlist/add"):
+                requested = ""
+                for item in fields.get("symbol", []):
+                    item = item.strip().upper()
+                    if item:
+                        requested = item
+                if SYMBOL_RE.match(requested):
                     control = load_control()
-                    control["active_symbol"] = requested
-                    save_control(control)
-                    logger.info(f"[เว็บควบคุม] คำขอเปลี่ยนเหรียญเป็น {requested}")
+                    watchlist = list(control.get("watchlist") or [])
+                    if requested not in watchlist:
+                        watchlist.append(requested)
+                        control["watchlist"] = watchlist
+                        save_control(control)
+                        logger.info(f"[เว็บควบคุม] เพิ่มเหรียญเข้าสู่รายการเฝ้า: {requested} ตอนนี้เฝ้า {watchlist}")
+                    else:
+                        logger.info(f"[เว็บควบคุม] {requested} อยู่ในรายการอยู่แล้ว")
                 else:
-                    logger.warning(f"[เว็บควบคุม] ปฏิเสธคำขอเปลี่ยนเหรียญ: รูปแบบไม่ถูกต้อง ({requested})")
+                    logger.warning(f"[เว็บควบคุม] ปฏิเสธเหรียญ: รูปแบบไม่ถูกต้อง ({requested})")
+
+            elif self.path == "/control/watchlist/remove":
+                requested = fields.get("symbol", [""])[0].strip().upper()
+                control = load_control()
+                watchlist = [s for s in (control.get("watchlist") or []) if s != requested]
+                control["watchlist"] = watchlist
+                save_control(control)
+                logger.info(f"[เว็บควบคุม] ขอเอา {requested} ออกจากรายการเฝ้า เหลือ {watchlist}")
+
+            elif self.path == "/control/max_positions":
+                raw_value = fields.get("max_open_positions", [""])[0].strip()
+                try:
+                    value = int(float(raw_value))
+                except ValueError:
+                    value = None
+                if value is not None and 1 <= value <= 10:
+                    control = load_control()
+                    control["max_open_positions"] = value
+                    save_control(control)
+                    logger.info(f"[เว็บควบคุม] ตั้งค่าถือได้พร้อมกัน {value} เหรียญ")
+                else:
+                    logger.warning(f"[เว็บควบคุม] ปฏิเสธจำนวนช่องถือ: '{raw_value}' (ต้องอยู่ระหว่าง 1-10)")
 
             elif self.path == "/control/trade_size":
                 raw_value = fields.get("trade_size_percent", [""])[0].strip()
@@ -1290,7 +1618,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 control = load_control()
                 control["unlock_requested"] = True
                 save_control(control)
-                logger.info("[เว็บควบคุม] ได้รับคำขอปลดล็อกบอท (HALTED -> IDLE) — จะมีผลในรอบ loop ถัดไป (ภายใน 60 วิ)")
+                logger.info("[เว็บควบคุม] ได้รับคำขอปลดล็อกบอท — จะมีผลในรอบ loop ถัดไป")
 
             self.send_response(303)
             self.send_header("Location", "/")
@@ -1304,8 +1632,72 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
 def start_dummy_health_check_server():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
+
+
+def _sync_bot_settings(bot, control):
+    if bot.max_daily_loss_percent != control["max_daily_loss_percent"]:
+        logger.info(
+            f"[{bot.symbol}] ปรับเพดานขาดทุนต่อวันจาก {bot.max_daily_loss_percent}% "
+            f"เป็น {control['max_daily_loss_percent']}% (สั่งจากหน้าเว็บ)"
+        )
+        bot.max_daily_loss_percent = control["max_daily_loss_percent"]
+    if bot.trade_size_percent != control["trade_size_percent"]:
+        logger.info(
+            f"[{bot.symbol}] ปรับอัตราเงินที่ใช้เข้าซื้อจาก {bot.trade_size_percent}% "
+            f"เป็น {control['trade_size_percent']}% (สั่งจากหน้าเว็บ)"
+        )
+        bot.trade_size_percent = control["trade_size_percent"]
+    if bot.max_consecutive_losses != control["max_consecutive_losses"]:
+        logger.info(
+            f"[{bot.symbol}] ปรับจำนวนไม้ขาดทุนติดกันก่อนหยุดจาก {bot.max_consecutive_losses} "
+            f"เป็น {control['max_consecutive_losses']} ไม้ (สั่งจากหน้าเว็บ)"
+        )
+        bot.max_consecutive_losses = control["max_consecutive_losses"]
+
+
+def maybe_reset_shared_daily(bots):
+    """รีเซ็ตวงจรรายวันระดับบัญชีครั้งเดียว ใช้มูลค่าพอร์ตรวมทุกเหรียญที่ถืออยู่"""
+    risk = load_shared_risk()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if risk.get("trade_date") == today:
+        return risk
+
+    sample = next(iter(bots.values()), None)
+    thb_free = 0.0
+    if sample is not None:
+        thb_free, _, _ = sample.get_free_balance()
+
+    total_equity = thb_free
+    for bot in bots.values():
+        if bot.state.get("status") == "HOLDING" and float(bot.state.get("quantity", 0) or 0) > 0:
+            latest_price = bot.get_latest_price()
+            if latest_price:
+                total_equity += bot.state["quantity"] * latest_price
+            else:
+                total_equity += bot.state["quantity"] * float(bot.state.get("entry_price", 0) or 0)
+
+    risk["trade_date"] = today
+    risk["daily_start_balance"] = total_equity
+    risk["daily_realized_pnl"] = 0.0
+    risk["consecutive_losses"] = 0
+    if risk.get("status") == "HALTED":
+        logger.info("วันใหม่: ปลดล็อก Circuit Breaker อัตโนมัติ — เปิดไม้ใหม่ได้อีกครั้ง")
+        risk["status"] = "IDLE"
+    save_shared_risk(risk)
+
+    for bot in bots.values():
+        bot.state["trade_date"] = today
+        bot.state["daily_start_balance"] = total_equity
+        bot.state["daily_realized_pnl"] = 0.0
+        bot.state["consecutive_losses"] = 0
+        if bot.state.get("status") == "HALTED":
+            bot.state["status"] = "IDLE"
+        bot.save_state()
+
+    logger.info(f"เริ่มวันใหม่ ({today}) มูลค่าพอร์ตรวมตั้งต้น: {total_equity:.2f} THB")
+    return risk
 
 
 if __name__ == "__main__":
@@ -1317,77 +1709,157 @@ if __name__ == "__main__":
             "(ห้าม hardcode API key/secret ลงในไฟล์โค้ดโดยเด็ดขาด)"
         )
 
-    # เปิด Server จำลองหลอก Render ให้ตรวจเจอ Port + เสิร์ฟแดชบอร์ด
     health_thread = threading.Thread(target=start_dummy_health_check_server, daemon=True)
     health_thread.start()
 
     POLL_INTERVAL_SEC = 15
 
     control = load_control()
-    save_control(control)  # เขียนกลับให้ path บน Firebase มีค่าเริ่มต้นแน่นอนตั้งแต่แรก
+    save_control(control)
 
-    current_symbol = control["active_symbol"]
-    RUNNING_SYMBOL["value"] = current_symbol
-    bot = InnovestXTradingBot(api_key=api_key, api_secret=api_secret, symbol=current_symbol)
-    bot.reconcile_state_on_startup()
+    bots = {}
 
-    logger.info(f"เริ่มบอทเทรด {current_symbol} (poll ทุก {POLL_INTERVAL_SEC} วิ) — กด Ctrl+C เพื่อหยุดอย่างปลอดภัย")
+    def get_or_create_bot(symbol):
+        if symbol not in bots:
+            logger.info(f"เริ่มเฝ้าเหรียญ {symbol}")
+            bot = InnovestXTradingBot(api_key=api_key, api_secret=api_secret, symbol=symbol, stop_loss_percent=3.0)
+            bot.max_daily_loss_percent = control["max_daily_loss_percent"]
+            bot.trade_size_percent = control["trade_size_percent"]
+            bot.max_consecutive_losses = control["max_consecutive_losses"]
+            bot.reconcile_state_on_startup()
+            bots[symbol] = bot
+        return bots[symbol]
+
+    for sym in control["watchlist"]:
+        get_or_create_bot(sym)
+
+    RUNNING_WATCHLIST["value"] = list(bots.keys())
+    RUNNING_SYMBOL["value"] = (control["watchlist"] or [DEFAULT_SYMBOL])[0]
+    logger.info(
+        f"เริ่มบอทเฝ้า {RUNNING_WATCHLIST['value']} "
+        f"(ถือได้สูงสุด {control['max_open_positions']} เหรียญ, poll ทุก {POLL_INTERVAL_SEC} วิ)"
+    )
 
     stop_all = False
     while not stop_all:
         control = load_control()
+        wanted = list(control.get("watchlist") or [])
 
-        # --- เช็คคำขอเปลี่ยนเหรียญจากหน้าเว็บ ---
-        if control["active_symbol"] != current_symbol:
-            if bot.state.get("quantity", 0) <= 0:
-                logger.info(f"🔄 เปลี่ยนเหรียญเทรดจาก {current_symbol} เป็น {control['active_symbol']} (สั่งจากหน้าเว็บ)")
-                current_symbol = control["active_symbol"]
-                bot = InnovestXTradingBot(api_key=api_key, api_secret=api_secret, symbol=current_symbol, stop_loss_percent=3.0)
-                bot.reconcile_state_on_startup()
-                RUNNING_SYMBOL["value"] = current_symbol
+        for sym in wanted:
+            get_or_create_bot(sym)
+
+        for sym in list(bots.keys()):
+            if sym in wanted:
+                continue
+            bot = bots[sym]
+            if bot.state.get("status") == "HOLDING" or float(bot.state.get("quantity", 0) or 0) > 0:
+                logger.info(f"มีคำขอเอา {sym} ออกจากรายการ แต่ยังถืออยู่ — รอขายก่อน แล้วค่อยเลิกเฝ้า")
             else:
-                logger.info(f"⏳ มีคำขอเปลี่ยนเป็น {control['active_symbol']} แต่ตอนนี้ถือ {current_symbol} อยู่ — รอขายก่อน")
+                logger.info(f"เลิกเฝ้า {sym} ตามคำสั่งจากหน้าเว็บ")
+                del bots[sym]
 
-        # --- ซิงค์ค่าเพดานขาดทุนต่อวันจากหน้าเว็บ (มีผลทันที ไม่ต้อง restart) ---
-        if bot.max_daily_loss_percent != control["max_daily_loss_percent"]:
-            logger.info(f"🔧 ปรับเพดานขาดทุนต่อวันจาก {bot.max_daily_loss_percent}% เป็น {control['max_daily_loss_percent']}% (สั่งจากหน้าเว็บ)")
-            bot.max_daily_loss_percent = control["max_daily_loss_percent"]
+        RUNNING_WATCHLIST["value"] = list(bots.keys())
+        if wanted:
+            RUNNING_SYMBOL["value"] = wanted[0]
+        elif bots:
+            RUNNING_SYMBOL["value"] = next(iter(bots))
 
-        # --- ซิงค์อัตราเงินที่ใช้เข้าซื้อต่อไม้จากหน้าเว็บ (มีผลทันที ไม่ต้อง restart) ---
-        if bot.trade_size_percent != control["trade_size_percent"]:
-            logger.info(f"🔧 ปรับอัตราเงินที่ใช้เข้าซื้อจาก {bot.trade_size_percent}% เป็น {control['trade_size_percent']}% (สั่งจากหน้าเว็บ)")
-            bot.trade_size_percent = control["trade_size_percent"]
+        for bot in bots.values():
+            _sync_bot_settings(bot, control)
 
-        # --- ซิงค์จำนวนไม้ขาดทุนติดกันก่อนหยุดจากหน้าเว็บ (มีผลทันที ไม่ต้อง restart) ---
-        if bot.max_consecutive_losses != control["max_consecutive_losses"]:
-            logger.info(f"🔧 ปรับจำนวนไม้ขาดทุนติดกันก่อนหยุดจาก {bot.max_consecutive_losses} เป็น {control['max_consecutive_losses']} ไม้ (สั่งจากหน้าเว็บ)")
-            bot.max_consecutive_losses = control["max_consecutive_losses"]
-
-        # --- เช็คคำขอปลดล็อก (HALTED -> IDLE) จากหน้าเว็บ ---
-        # แก้ค่าตรงที่ bot.state ในหน่วยความจำเลย (ไม่ใช่แค่บน Firebase) เพราะบอทที่รันอยู่
-        # จะไม่อ่าน state ซ้ำระหว่างรัน ถ้าไปแก้ Firebase ตรงๆ บอทจะเขียนทับกลับเป็น HALTED เหมือนเดิม
         if control["unlock_requested"]:
-            if bot.state.get("status") == "HALTED":
-                logger.info("🔓 ปลดล็อกบอทตามคำขอจากหน้าเว็บ: HALTED -> IDLE (รีเซ็ตขาดทุนติดกันเป็น 0)")
-                bot.state["status"] = "IDLE"
-                bot.state["consecutive_losses"] = 0
-                bot.save_state()
+            risk = load_shared_risk()
+            if risk.get("status") == "HALTED":
+                logger.info("ปลดล็อกบอทตามคำขอจากหน้าเว็บ: HALTED -> IDLE (รีเซ็ตขาดทุนติดกันเป็น 0)")
+                risk["status"] = "IDLE"
+                risk["consecutive_losses"] = 0
+                save_shared_risk(risk)
+            for bot in bots.values():
+                if bot.state.get("status") == "HALTED":
+                    bot.state["status"] = "IDLE"
+                    bot.state["consecutive_losses"] = 0
+                    bot.save_state()
             control["unlock_requested"] = False
             save_control(control)
 
-        # --- เช็คสถานะหยุดชั่วคราวจากหน้าเว็บ ---
-        if control["paused"]:
-            logger.info("⏸ บอทหยุดชั่วคราว (สั่งโดยผู้ใช้ผ่านหน้าเว็บ) — ข้ามการเทรดรอบนี้")
+        if bots:
+            maybe_reset_shared_daily(bots)
+
+        if not bots:
+            logger.info("รายการเฝ้าว่าง — รอเพิ่มเหรียญจากหน้าเว็บ")
+        elif control["paused"]:
+            logger.info("บอทหยุดชั่วคราว (สั่งโดยผู้ใช้ผ่านหน้าเว็บ) — ยังเก็บราคาต่อ แต่ไม่เปิดออเดอร์ใหม่")
+            for bot in bots.values():
+                try:
+                    bot.poll_price()
+                except Exception:
+                    logger.exception(f"[{bot.symbol}] ดึงราคาตอนหยุดชั่วคราวล้มเหลว")
         else:
-            try:
-                bot.run_once()
-            except Exception:
-                logger.exception("เกิดข้อผิดพลาดไม่คาดคิดใน main loop — บอทจะพยายามทำงานต่อในรอบถัดไป")
+            prices = {}
+            for bot in bots.values():
+                try:
+                    prices[bot.symbol] = bot.poll_price()
+                except Exception:
+                    logger.exception(f"[{bot.symbol}] ดึงราคาล้มเหลว")
+                time.sleep(0.2)
+
+            for bot in bots.values():
+                px = prices.get(bot.symbol)
+                if px is None:
+                    continue
+                if bot.state.get("status") == "HOLDING":
+                    try:
+                        bot.run_strategy(px)
+                    except Exception:
+                        logger.exception(f"[{bot.symbol}] ดูแลโพซิชันล้มเหลว")
+
+            risk = load_shared_risk()
+            holding_count = sum(1 for b in bots.values() if b.state.get("status") == "HOLDING")
+            slots = int(control["max_open_positions"]) - holding_count
+
+            if risk.get("status") == "HALTED":
+                logger.warning("บัญชีถูก HALTED จาก Circuit Breaker — ไม่เปิดออเดอร์ซื้อใหม่ (โพซิชันที่ถืออยู่ยังถูกดูแล)")
+            elif slots <= 0:
+                logger.info(f"ถือครบ {holding_count}/{control['max_open_positions']} ช่อง — รอขายก่อนจึงมองหาเหรียญถัดไป")
+            else:
+                candidates = []
+                for bot in bots.values():
+                    if bot.state.get("status") != "IDLE":
+                        continue
+                    px = prices.get(bot.symbol)
+                    if px is None:
+                        continue
+                    try:
+                        signal = bot.analyze_trend(px)
+                    except Exception:
+                        logger.exception(f"[{bot.symbol}] วิเคราะห์เทรนด์ล้มเหลว")
+                        continue
+                    if signal.get("should_buy"):
+                        candidates.append((bot, px, signal))
+
+                candidates.sort(key=lambda item: (item[2]["confidence"], item[2]["change_1h"]), reverse=True)
+
+                for bot, px, signal in candidates:
+                    holding_count = sum(1 for b in bots.values() if b.state.get("status") == "HOLDING")
+                    if holding_count >= int(control["max_open_positions"]):
+                        logger.info("ช่องถือเต็มแล้ว — เหรียญที่เหลือจะรอจนมีช่องว่างหลังขาย")
+                        break
+                    logger.info(
+                        f"[{bot.symbol}] สัญญาณขาขึ้น ยืนยัน {signal['confidence']}% "
+                        f"({signal['change_1h']:+.2f}% ใน 1 ชม.) — พยายามเข้าซื้อ"
+                    )
+                    try:
+                        bot.try_enter_position(px)
+                    except Exception:
+                        logger.exception(f"[{bot.symbol}] เข้าซื้อล้มเหลว")
+                    time.sleep(0.3)
 
         for _ in range(POLL_INTERVAL_SEC):
-            if bot._stop_requested:
+            if STOP_ALL["value"] or any(b._stop_requested for b in bots.values()):
                 stop_all = True
                 break
             time.sleep(1)
 
+    for bot in bots.values():
+        bot.save_state()
     logger.info("บอทหยุดทำงานเรียบร้อย (state ถูกบันทึกแล้ว)")
