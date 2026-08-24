@@ -2030,9 +2030,6 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
     </section>
     ${banners_html}
     ${progress_html}
-    <div class="grid">
-      ${cards_html}
-    </div>
     ${coin_cards_html}
 <section class="control">
 <div class="control-stats">
@@ -2402,16 +2399,13 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
                 "</section>"
             )
 
-    cards = [
+    control_cards_html = "".join([
         _render_card(
             "กำไรวันนี้ (รับรู้แล้ว)",
             f"{'+' if daily_pnl >= 0 else ''}{_fmt_thb(daily_pnl)} ฿",
             value_class="positive" if daily_pnl >= 0 else "negative",
         ),
         _render_card("ทุนเริ่มต้นวันนี้", f"{_fmt_thb(daily_start)} ฿"),
-    ]
-    cards_html = "".join(cards)
-    control_cards_html = "".join([
         _render_card("ขาดทุนติดกัน", f"{consecutive_losses} / {active_max_consecutive_losses} ไม้"),
         _render_card("เหรียญในรายการ", f"{len(watchlist)} ตัว", sub=f"ถือได้สูงสุด {max_open} ช่อง", value_class="accent"),
     ])
@@ -2598,7 +2592,6 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         freshness_html=freshness_html,
         banners_html=banners_html,
         progress_html=progress_html,
-        cards_html=cards_html,
         coin_cards_html=coin_cards_html,
         control_cards_html=control_cards_html,
         unlock_button_html=unlock_button_html,
