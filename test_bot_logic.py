@@ -507,6 +507,47 @@ class BuyPathTests(unittest.TestCase):
         self.assertTrue(any("เฝ้าต่อ" in t for t in notes))
 
 
+class TrailingStopTests(unittest.TestCase):
+    def _holding(self, entry=100.0, highest=100.3, bid=99.2, last=99.3, ask=99.5):
+        b = bot.InnovestXTradingBot("k", "s", symbol="BTCTHB")
+        b.save_state = lambda: None
+        b.save_market = lambda **k: None
+        b.trailing_stop_percent = 1.0
+        b.stop_loss_percent = 3.0
+        b.state.update({
+            "status": "HOLDING",
+            "entry_price": entry,
+            "highest_price": highest,
+            "quantity": 1.0,
+            "roundtrip_fee_percent": 0.4,
+            "quote": {"bid": bid, "ask": ask, "last": last, "spread_pct": 0.3},
+        })
+        sold = []
+        b.sell_position = lambda qty, current_price=None, reason="": sold.append(reason)
+        return b, sold
+
+    def test_tiny_peak_then_small_pullback_does_not_sell(self):
+        b, sold = self._holding(highest=100.3, bid=99.2, last=99.3)
+        b.run_strategy(99.3)
+        self.assertEqual(sold, [])
+        self.assertEqual(b.state["status"], "HOLDING")
+
+    def test_real_peak_trailing_sells_when_still_in_profit(self):
+        b, sold = self._holding(highest=102.0, bid=100.85, last=100.9, ask=101.0)
+        b.run_strategy(100.9)
+        self.assertEqual(sold, ["trailing"])
+
+    def test_real_peak_does_not_trailing_sell_below_breakeven(self):
+        b, sold = self._holding(highest=102.0, bid=100.2, last=100.3, ask=100.4)
+        b.run_strategy(100.3)
+        self.assertEqual(sold, [])
+
+    def test_hard_stop_loss_still_sells_after_tiny_peak(self):
+        b, sold = self._holding(highest=100.2, bid=96.5, last=96.6, ask=96.8)
+        b.run_strategy(96.6)
+        self.assertEqual(sold, ["stop_loss"])
+
+
 class WatchPauseTests(unittest.TestCase):
     def test_apply_pause_and_resume(self):
         control = {"watchlist": ["ETHTHB", "SOLTHB"], "paused_symbols": []}

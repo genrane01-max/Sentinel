@@ -1660,29 +1660,35 @@ class InnovestXTradingBot:
                 highest_price = current_price
                 logger.info(f"🚀 จุดสูงสุดใหม่: {current_price} THB")
 
-            # trailing stop ควรทำงานเฉพาะตอนที่ "เคยขึ้นไปเหนือทุนจริง ๆ" แล้วเท่านั้น
-            # ถ้ายังไม่เคย (highest_price ยัง <= entry_price เพราะราคาไหลลงตรงๆ ตั้งแต่ซื้อ)
-            # ต้องปล่อยให้ stop_loss_percent เป็นตัวตัดสินใจแทน ไม่งั้นถ้า trailing_stop_percent
-            # ตั้งไว้ต่ำกว่า stop_loss_percent (ค่า default 1% < 3%) trailing จะแย่งตัดขาย
-            # ก่อน stop loss ทุกครั้งที่ราคาลง ทำให้ "หยุดขาดทุนสูงสุด" ที่ตั้งไว้ 3% ไม่เคยมีผลจริง
-            has_peaked = highest_price > entry_price
+            # Trailing ใช้ล็อกกำไรหลังราคาขึ้นพอแล้ว ไม่ใช่ตัดไม้ที่ขึ้นแค่ติ๊ก
+            # ต้องขึ้นสูงกว่าต้นทุนอย่างน้อย (ค่าธรรมเนียมไป-กลับ + % trailing)
+            # ไม่งั้น default trail 1% จะแย่งตัดก่อน stop loss 3% ทุกครั้งที่ราคาย่อเล็กน้อย
             trailing_threshold = highest_price * (1 - self.trailing_stop_percent / 100)
             stop_loss_threshold = entry_price * (1 - self.stop_loss_percent / 100)
-            breakeven_price = entry_price * (1 + fee_pct / 100)  # breakeven จริงหลังหักค่าธรรมเนียม
+            breakeven_price = entry_price * (1 + fee_pct / 100)
+            min_peak_price = entry_price * (1 + (fee_pct + self.trailing_stop_percent) / 100)
+            trailing_armed = highest_price >= min_peak_price
 
             if sell_mark <= stop_loss_threshold:
                 logger.warning("🚨 ถึงจุด Hard Stop Loss ขายทันทีเพื่อจำกัดความเสียหาย")
                 self.sell_position(qty, sell_mark, reason="stop_loss")
-            elif has_peaked and sell_mark <= trailing_threshold:
-                # ขายทันทีที่ราคาย่อลงมาเกิน trailing_stop_percent จากจุดสูงสุด ไม่รอเช็ค breakeven อีกต่อไป
-                # (ของเดิมจะถือต่อถ้ายังไม่คุ้มค่าธรรมเนียม ทำให้บางครั้งไม่ขายเลย)
-                if sell_mark > breakeven_price:
-                    logger.info(f"💰 ถึงจุด Trailing Stop ({self.trailing_stop_percent}%) และคุ้มค่าธรรมเนียม "
-                                f"(breakeven {breakeven_price:.2f}) ขายล็อกกำไร")
+            elif sell_mark <= trailing_threshold:
+                if not trailing_armed:
+                    logger.info(
+                        f"[{self.symbol}] ข้าม Trailing Stop: จุดสูงสุด {highest_price} "
+                        f"ยังขึ้นไม่พอสำหรับล็อกกำไร (ต้องถึง {min_peak_price:.2f}) — ถือต่อ ให้ Stop Loss ดูแล"
+                    )
+                elif sell_mark > breakeven_price:
+                    logger.info(
+                        f"💰 ถึงจุด Trailing Stop ({self.trailing_stop_percent}%) และคุ้มค่าธรรมเนียม "
+                        f"(breakeven {breakeven_price:.2f}) ขายล็อกกำไร"
+                    )
+                    self.sell_position(qty, sell_mark, reason="trailing")
                 else:
-                    logger.warning(f"⚠️ ถึงจุด Trailing Stop ({self.trailing_stop_percent}%) แต่ยังไม่คุ้มค่าธรรมเนียม "
-                                   f"(breakeven {breakeven_price:.2f}) — ขายตามคำสั่งใหม่ (ไม่ถือรอแล้ว)")
-                self.sell_position(qty, sell_mark, reason="trailing")
+                    logger.info(
+                        f"[{self.symbol}] ถึง Trailing Stop แต่ราคา {sell_mark:.2f} "
+                        f"ยังต่ำกว่า breakeven {breakeven_price:.2f} — ถือต่อ ไม่ขายทิ้งแบบไม่ได้กำไร"
+                    )
 
     def sell_position(self, qty, current_price=None, reason=""):
         _, coin_free, has_pending = self.get_free_balance()
@@ -2079,7 +2085,7 @@ name="max_daily_loss_percent" value="${max_daily_loss_percent}">
 <div class="control-label" style="font-size:12px; margin-top:16px;">ขึ้นไปแล้วย่อลงจากจุดสูงสุดเกิน (%) → ขาย (Trailing Stop)</div>
 <input class="symbol-input" style="text-transform:none;" type="number" step="0.1" min="0.1" max="20"
 name="trailing_stop_percent" value="${trailing_stop_percent}">
-<div class="control-sub">ใช้เฉพาะตอนที่ราคาเคยขึ้นเหนือทุนจริงแล้วเท่านั้น ถ้าซื้อแล้วราคาไม่เคยขึ้นเลย จะใช้ Stop Loss ด้านล่างตัดสินใจแทน</div>
+<div class="control-sub">ใช้เมื่อราคาเคยขึ้นพอที่จะล็อกกำไรได้ (สูงกว่าต้นทุนอย่างน้อยค่าธรรมเนียม + % นี้) ขึ้นแค่ติ๊กแล้วย่อ จะไม่ขาย ทิ้งให้ Stop Loss ตัดสิน</div>
 
 <div class="control-label" style="font-size:12px; margin-top:16px;">เข้าซื้อแล้วราคาลงจากต้นทุนเกิน (%) → ขายตัดขาดทุน (Stop Loss)</div>
 <input class="symbol-input" style="text-transform:none;" type="number" step="0.1" min="0.1" max="50"
