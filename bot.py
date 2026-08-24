@@ -143,8 +143,8 @@ MAX_SPREAD_PERCENT = 0.5         # ไม่ซื้อถ้า (ask-bid)/mid 
 ORDER_SEND_PATH = "/api/v1/digital-asset/order/send"
 PENDING_ORDER_TTL_SEC = 600  # ล็อกกันยิงซ้ำอย่างน้อย 10 นาที — ห้ามปลดแค่เพราะหมดเวลาถ้ายังไม่เช็คพอร์ต
 RECENT_ORDER_LOOKBACK_SEC = 180
-MARKET_HISTORY_FLUSH_SEC = 120
-PRICE_TICK_MIN_INTERVAL_SEC = 60
+MARKET_HISTORY_FLUSH_SEC = 150
+PRICE_TICK_MIN_INTERVAL_SEC = 15
 PRICE_TICK_MIN_MOVE_PERCENT = 0.05
 _SYMBOL_CATALOG = {"ts": 0.0, "symbols": None}
 _SHUTDOWN_HANDLERS_INSTALLED = False
@@ -2144,7 +2144,7 @@ ${password_field_html}
     var ae = document.activeElement;
     if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT")) return;
     location.reload();
-  }, 30000);
+  }, 10000);
 })();
 function addSymbolPick(sym){
   var el = document.getElementById('add-symbols-input');
@@ -2908,7 +2908,7 @@ if __name__ == "__main__":
     health_thread = threading.Thread(target=start_dummy_health_check_server, daemon=True)
     health_thread.start()
 
-    POLL_INTERVAL_SEC = 15
+    POLL_INTERVAL_SEC = 10
 
     control = load_control()
     save_control(control)
