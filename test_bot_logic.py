@@ -224,8 +224,8 @@ class OrderSafetyTests(unittest.TestCase):
 
     def test_price_tick_skips_near_duplicates(self):
         hist = [[1000.0, 100.0]]
-        self.assertFalse(bot.should_append_price_tick(hist, 1030.0, 100.02))
-        self.assertTrue(bot.should_append_price_tick(hist, 1070.0, 100.02))
+        self.assertFalse(bot.should_append_price_tick(hist, 1010.0, 100.02))  # ยังไม่ครบ 15 วิ และขยับน้อย
+        self.assertTrue(bot.should_append_price_tick(hist, 1016.0, 100.02))   # ครบช่วงแล้ว
         self.assertTrue(bot.should_append_price_tick(hist, 1010.0, 100.20))  # ขยับ 0.2%
 
     def test_sell_without_fill_price_stays_holding(self):
@@ -614,6 +614,97 @@ class HistoryGapTests(unittest.TestCase):
         )
         self.assertIn("กำลังสะสมข้อมูลราคา", html)
         self.assertIn("รอข้อมูล", html)
+
+
+class ControlPersistenceTests(unittest.TestCase):
+    def setUp(self):
+        bot._CONTROL_CACHE["value"] = None
+        bot._CONTROL_CACHE["fresh"] = False
+
+    def tearDown(self):
+        bot._CONTROL_CACHE["value"] = None
+        bot._CONTROL_CACHE["fresh"] = False
+
+    def test_failed_load_does_not_invent_btc_watchlist(self):
+        with patch.object(bot, "primary_ref") as ref:
+            ref.return_value.get.side_effect = TimeoutError("Firebase ไม่ตอบใน 12 วินาที")
+            control = bot.load_control()
+        self.assertEqual(control["watchlist"], [])
+        self.assertTrue(control.get("_uninitialized"))
+        self.assertFalse(bot._CONTROL_CACHE["fresh"])
+
+    def test_save_skips_uninitialized_so_watchlist_is_not_overwritten(self):
+        writes = []
+
+        class _Ref:
+            def set(self, value):
+                writes.append(value)
+
+        with patch.object(bot, "primary_ref", return_value=_Ref()):
+            ok = bot.save_control(bot._uninitialized_control())
+        self.assertFalse(ok)
+        self.assertEqual(writes, [])
+
+    def test_failed_load_reuses_cached_watchlist(self):
+        bot._CONTROL_CACHE["value"] = {
+            "watchlist": ["ETHTHB", "SOLTHB"],
+            "active_symbol": "ETHTHB",
+            "paused": False,
+            "paused_symbols": [],
+            "pause_reasons": {},
+            "max_daily_loss_percent": 5,
+            "trade_size_percent": 30,
+            "max_consecutive_losses": 3,
+            "max_open_positions": 3,
+            "trailing_stop_percent": 1,
+            "stop_loss_percent": 3,
+            "unlock_requested": False,
+        }
+        bot._CONTROL_CACHE["fresh"] = True
+        with patch.object(bot, "primary_ref") as ref:
+            ref.return_value.get.side_effect = TimeoutError("Firebase ไม่ตอบใน 12 วินาที")
+            control = bot.load_control()
+        self.assertEqual(control["watchlist"], ["ETHTHB", "SOLTHB"])
+        self.assertFalse(control.get("_uninitialized"))
+
+    def test_successful_load_then_save_writes_real_watchlist(self):
+        writes = []
+
+        class _Ref:
+            def get(self):
+                return {"watchlist": ["ETHTHB", "XRPTHB"], "trade_size_percent": 30}
+
+            def set(self, value):
+                writes.append(value)
+
+        with patch.object(bot, "primary_ref", return_value=_Ref()):
+            control = bot.load_control()
+            self.assertEqual(control["watchlist"], ["ETHTHB", "XRPTHB"])
+            self.assertTrue(bot._CONTROL_CACHE["fresh"])
+            self.assertTrue(bot.save_control(control))
+        self.assertEqual(writes[0]["watchlist"], ["ETHTHB", "XRPTHB"])
+        self.assertNotIn("_uninitialized", writes[0])
+
+    def test_wait_for_fresh_control_retries_then_stays_uninitialized(self):
+        with patch.object(bot, "init_firebase", return_value=False), \
+             patch.object(bot, "load_control", side_effect=lambda: bot._uninitialized_control()), \
+             patch("bot.time.sleep", return_value=None):
+            control = bot.wait_for_fresh_control(attempts=3, base_sleep=0)
+        self.assertTrue(control.get("_uninitialized"))
+        self.assertEqual(control["watchlist"], [])
+
+    def test_dashboard_warns_when_control_uninitialized(self):
+        html = bot.render_dashboard(
+            [],
+            {},
+            bot._uninitialized_control(),
+            {},
+        )
+        self.assertIn("ยังอ่านรายการเหรียญจาก Firebase ไม่ได้", html)
+        self.assertIn("ไม่เขียนทับ", html)
+
+    def test_health_server_is_threaded(self):
+        self.assertTrue(issubclass(bot.ThreadingHTTPServer, bot.ThreadingMixIn))
 
 
 if __name__ == "__main__":

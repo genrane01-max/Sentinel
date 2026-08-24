@@ -28,6 +28,7 @@ import threading
 import urllib.parse
 from string import Template
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 
 import requests
 import firebase_admin
@@ -50,38 +51,8 @@ logger = logging.getLogger("Sentinel")
 # ฐานที่ 2 (DB2): bid/offer + ประวัติราคา — ตั้ง FIREBASE_DATABASE_URL_2 เมื่อพร้อม
 MARKET_APP_NAME = "market"
 _market_db_enabled = False
-
-
-def init_firebase():
-    global _market_db_enabled
-    try:
-        if not firebase_admin._apps:
-            cred_path = os.getenv("FIREBASE_CREDENTIALS", "/etc/secrets/firebase.json")
-            cred = credentials.Certificate(cred_path)
-            db_url = os.getenv("FIREBASE_DATABASE_URL")
-            firebase_admin.initialize_app(cred, {"databaseURL": db_url})
-            logger.info("Firebase DB1 (สถานะเทรด) เชื่อมต่อสำเร็จ")
-
-            db_url_2 = (os.getenv("FIREBASE_DATABASE_URL_2") or "").strip()
-            if db_url_2:
-                cred2_path = os.getenv("FIREBASE_CREDENTIALS_2", "/etc/secrets/firebase2.json")
-                cred2 = credentials.Certificate(cred2_path) if cred2_path and os.path.isfile(cred2_path) else cred
-                firebase_admin.initialize_app(cred2, {"databaseURL": db_url_2}, name=MARKET_APP_NAME)
-                _market_db_enabled = True
-                logger.info("Firebase DB2 (bid/offer + ประวัติราคา) เชื่อมต่อสำเร็จ")
-            else:
-                logger.warning(
-                    "ยังไม่มี FIREBASE_DATABASE_URL_2 — bid/offer และประวัติราคาจะลงฐานหลักไปก่อน "
-                    "จนกว่าจะเพิ่มฐานที่สอง"
-                )
-        else:
-            try:
-                firebase_admin.get_app(MARKET_APP_NAME)
-                _market_db_enabled = True
-            except (ValueError, KeyError):
-                _market_db_enabled = False
-    except Exception as e:
-        logger.error(f"Firebase Init Error: {e}")
+_FIREBASE_READY = {"value": False}
+FIREBASE_INIT_TIMEOUT_SEC = 15
 
 
 def firebase_call(fn, timeout=12, what="Firebase"):
@@ -106,6 +77,56 @@ def firebase_call(fn, timeout=12, what="Firebase"):
     return box["value"]
 
 
+def _init_firebase_apps():
+    global _market_db_enabled
+    cred_path = os.getenv("FIREBASE_CREDENTIALS", "/etc/secrets/firebase.json")
+    cred = credentials.Certificate(cred_path)
+    db_url = os.getenv("FIREBASE_DATABASE_URL")
+    firebase_admin.initialize_app(cred, {"databaseURL": db_url})
+    logger.info("Firebase DB1 (สถานะเทรด) เชื่อมต่อสำเร็จ")
+
+    db_url_2 = (os.getenv("FIREBASE_DATABASE_URL_2") or "").strip()
+    if db_url_2:
+        cred2_path = os.getenv("FIREBASE_CREDENTIALS_2", "/etc/secrets/firebase2.json")
+        cred2 = credentials.Certificate(cred2_path) if cred2_path and os.path.isfile(cred2_path) else cred
+        firebase_admin.initialize_app(cred2, {"databaseURL": db_url_2}, name=MARKET_APP_NAME)
+        _market_db_enabled = True
+        logger.info("Firebase DB2 (bid/offer + ประวัติราคา) เชื่อมต่อสำเร็จ")
+    else:
+        logger.warning(
+            "ยังไม่มี FIREBASE_DATABASE_URL_2 — bid/offer และประวัติราคาจะลงฐานหลักไปก่อน "
+            "จนกว่าจะเพิ่มฐานที่สอง"
+        )
+    return True
+
+
+def init_firebase(timeout=FIREBASE_INIT_TIMEOUT_SEC):
+    """เชื่อม Firebase — มี timeout เพื่อไม่ให้โปรเซสค้างก่อนเปิด /health"""
+    global _market_db_enabled
+    if firebase_admin._apps:
+        try:
+            firebase_admin.get_app(MARKET_APP_NAME)
+            _market_db_enabled = True
+        except (ValueError, KeyError):
+            _market_db_enabled = False
+        _FIREBASE_READY["value"] = True
+        return True
+    try:
+        firebase_call(_init_firebase_apps, timeout=timeout, what="Firebase init")
+        _FIREBASE_READY["value"] = True
+        return True
+    except Exception as e:
+        logger.error(f"Firebase Init Error: {e}")
+        _FIREBASE_READY["value"] = False
+        return False
+
+
+def _ensure_firebase():
+    if firebase_admin._apps:
+        return True
+    return init_firebase()
+
+
 class _TimedFirebaseRef:
     def __init__(self, ref, label):
         self._ref = ref
@@ -123,11 +144,13 @@ class _TimedFirebaseRef:
 
 def primary_ref(path):
     """โหนดบนฐานหลัก (สถานะเทรด / ตั้งค่า)"""
+    _ensure_firebase()
     return _TimedFirebaseRef(db.reference(path), f"DB1:{path}")
 
 
 def market_ref(path):
     """โหนดบนฐานที่ 2 ถ้ามี ไม่งั้นใช้ฐานหลักที่ path เดิม"""
+    _ensure_firebase()
     if _market_db_enabled:
         try:
             return _TimedFirebaseRef(
@@ -161,7 +184,7 @@ def load_symbol_view(symbol):
     return state
 
 
-init_firebase()
+# อย่าเชื่อม Firebase ตอน import — เปิด /health ก่อน แล้วค่อยเชื่อมใน __main__
 
 # ==================== การควบคุมบอทจากหน้าเว็บ ====================
 DEFAULT_SYMBOL = os.environ.get("SYMBOL", "BTCTHB").upper()
@@ -696,21 +719,11 @@ def _normalize_watchlist(raw, fallback_symbol):
     return []
 
 
-_CONTROL_CACHE = {"value": None}
+_CONTROL_CACHE = {"value": None, "fresh": False}
 
 
-def load_control():
-    """อ่านคำสั่งควบคุมล่าสุดจากหน้าเว็บ (รายการเหรียญที่เฝ้า, หยุดชั่วคราว, ความเสี่ยง, จำนวนช่องถือพร้อมกัน)"""
-    try:
-        data = primary_ref("bot_control").get() or {}
-    except Exception as e:
-        cached = _CONTROL_CACHE.get("value")
-        if cached is not None:
-            logger.warning(f"อ่าน bot_control จาก Firebase ไม่ได้ ใช้ค่าล่าสุดที่อ่านได้: {e}")
-            return dict(cached)
-        logger.warning(f"อ่าน bot_control จาก Firebase ไม่ได้ ใช้ค่าเริ่มต้น: {e}")
-        data = {}
-
+def _build_control(data):
+    data = data or {}
     try:
         max_daily_loss_percent = float(data.get("max_daily_loss_percent", InnovestXTradingBot.MAX_DAILY_LOSS_PERCENT))
     except (TypeError, ValueError):
@@ -769,7 +782,7 @@ def load_control():
             if sym in paused_symbols:
                 pause_reasons[sym] = str(value or "user")
 
-    result = {
+    return {
         "active_symbol": watchlist[0] if watchlist else fallback_symbol,
         "watchlist": watchlist,
         "paused": bool(data.get("paused", False)),
@@ -783,19 +796,74 @@ def load_control():
         "stop_loss_percent": stop_loss_percent,
         "unlock_requested": bool(data.get("unlock_requested", False)),
     }
+
+
+def _uninitialized_control():
+    """ค่าปลอดภัยตอนยังอ่าน Firebase ไม่ได้ — รายการว่าง ไม่ซื้อ และห้ามเขียนทับของจริง"""
+    result = _build_control({})
+    result["watchlist"] = []
+    result["paused_symbols"] = []
+    result["pause_reasons"] = {}
+    result["_uninitialized"] = True
+    return result
+
+
+def load_control():
+    """อ่านคำสั่งควบคุมล่าสุดจากหน้าเว็บ (รายการเหรียญที่เฝ้า, หยุดชั่วคราว, ความเสี่ยง, จำนวนช่องถือพร้อมกัน)"""
+    try:
+        data = primary_ref("bot_control").get() or {}
+    except Exception as e:
+        cached = _CONTROL_CACHE.get("value")
+        if cached is not None:
+            logger.warning(f"อ่าน bot_control จาก Firebase ไม่ได้ ใช้ค่าล่าสุดที่อ่านได้: {e}")
+            return dict(cached)
+        logger.warning(
+            f"อ่าน bot_control จาก Firebase ไม่ได้ — ยังไม่ใช้ค่าเริ่มต้นและจะไม่เขียนทับ watchlist: {e}"
+        )
+        return _uninitialized_control()
+
+    result = _build_control(data)
     _CONTROL_CACHE["value"] = result
+    _CONTROL_CACHE["fresh"] = True
     return result
 
 
 def save_control(control):
+    if not isinstance(control, dict) or control.get("_uninitialized"):
+        logger.warning("ข้ามการบันทึก bot_control — ยังอ่านของจริงจาก Firebase ไม่ได้ กันเขียนทับ watchlist")
+        return False
     try:
-        if control.get("watchlist"):
-            control["active_symbol"] = control["watchlist"][0]
-        elif not control.get("active_symbol"):
+        payload = {k: v for k, v in control.items() if k != "_uninitialized"}
+        if payload.get("watchlist"):
+            payload["active_symbol"] = payload["watchlist"][0]
+            control["active_symbol"] = payload["active_symbol"]
+        elif not payload.get("active_symbol"):
+            payload["active_symbol"] = DEFAULT_SYMBOL
             control["active_symbol"] = DEFAULT_SYMBOL
-        primary_ref("bot_control").set(control)
+        primary_ref("bot_control").set(payload)
+        _CONTROL_CACHE["value"] = dict(payload)
+        _CONTROL_CACHE["fresh"] = True
+        return True
     except Exception as e:
         logger.error(f"บันทึก bot_control ไป Firebase ไม่สำเร็จ: {e}")
+        return False
+
+
+def wait_for_fresh_control(attempts=8, base_sleep=2):
+    """รออ่าน bot_control จริงจาก Firebase — ไม่เขียนค่าเริ่มต้นทับถ้ายังอ่านไม่ได้"""
+    control = None
+    for attempt in range(1, attempts + 1):
+        init_firebase()
+        control = load_control()
+        if _CONTROL_CACHE.get("fresh") and not control.get("_uninitialized"):
+            return control
+        logger.warning(
+            f"อ่าน bot_control จาก Firebase ไม่ได้ครั้งที่ {attempt}/{attempts} "
+            f"— ยังไม่เขียนทับรายการเหรียญ"
+        )
+        if attempt < attempts:
+            time.sleep(min(base_sleep * attempt, 10))
+    return control if control is not None else _uninitialized_control()
 
 
 def notify_telegram(text):
@@ -2416,6 +2484,11 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             freshness_html = f'<div class="hero-sub">อัปเดตราคาเมื่อ {age_text} ที่แล้ว</div>'
 
     banners = []
+    if control.get("_uninitialized"):
+        banners.append(
+            '<div class="banner banner-warning">ยังอ่านรายการเหรียญจาก Firebase ไม่ได้ '
+            "— ไม่ได้ลบของเดิม และบอทจะไม่เขียนทับ watchlist กำลังลองใหม่อัตโนมัติ</div>"
+        )
     if price_age_sec is not None and price_age_sec > PRICE_STALE_THRESHOLD_SEC:
         age_min = int(price_age_sec // 60)
         banners.append(
@@ -2924,9 +2997,15 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 def start_dummy_health_check_server():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logger.info(f"เปิดหน้าเว็บและ /health ที่พอร์ต {port} (แยกคิวจากแดชบอร์ด)")
     server.serve_forever()
 
 
@@ -3016,11 +3095,18 @@ if __name__ == "__main__":
 
     health_thread = threading.Thread(target=start_dummy_health_check_server, daemon=True)
     health_thread.start()
+    logger.info("เปิด /health แล้ว กำลังเชื่อม Firebase — ถ้าเชื่อมช้า Render จะไม่คิดว่าเครื่องตาย")
 
     POLL_INTERVAL_SEC = 15
 
-    control = load_control()
-    save_control(control)
+    control = wait_for_fresh_control()
+    if _CONTROL_CACHE.get("fresh") and not control.get("_uninitialized"):
+        save_control(control)
+    else:
+        logger.error(
+            "ยังอ่าน bot_control จาก Firebase ไม่ได้ — เริ่มลูปโดยไม่เขียนทับรายการเหรียญ "
+            "จะลองใหม่ทุกม้วน"
+        )
 
     bots = LIVE_BOTS
     install_shutdown_handlers()
@@ -3056,20 +3142,26 @@ if __name__ == "__main__":
         n_cycle += 1
         try:
             control = load_control()
-            wanted = list(control.get("watchlist") or [])
+            if control.get("_uninitialized"):
+                logger.warning(
+                    f"รอบที่ {n_cycle} ยังอ่าน bot_control ไม่ได้ — คงรายการเหรียญเดิม ไม่เพิ่ม/ลบ/เขียนทับ"
+                )
+                wanted = list(bots.keys())
+            else:
+                wanted = list(control.get("watchlist") or [])
 
-            for sym in wanted:
-                get_or_create_bot(sym)
+                for sym in wanted:
+                    get_or_create_bot(sym)
 
-            for sym in list(bots.keys()):
-                if sym in wanted:
-                    continue
-                bot = bots[sym]
-                if bot.state.get("status") == "HOLDING" or float(bot.state.get("quantity", 0) or 0) > 0:
-                    logger.info(f"มีคำขอเอา {sym} ออกจากรายการ แต่ยังถืออยู่ — รอขายก่อน แล้วค่อยเลิกเฝ้า")
-                else:
-                    logger.info(f"เลิกเฝ้า {sym} ตามคำสั่งจากหน้าเว็บ")
-                    del bots[sym]
+                for sym in list(bots.keys()):
+                    if sym in wanted:
+                        continue
+                    bot = bots[sym]
+                    if bot.state.get("status") == "HOLDING" or float(bot.state.get("quantity", 0) or 0) > 0:
+                        logger.info(f"มีคำขอเอา {sym} ออกจากรายการ แต่ยังถืออยู่ — รอขายก่อน แล้วค่อยเลิกเฝ้า")
+                    else:
+                        logger.info(f"เลิกเฝ้า {sym} ตามคำสั่งจากหน้าเว็บ")
+                        del bots[sym]
 
             RUNNING_WATCHLIST["value"] = list(bots.keys())
             if wanted:
@@ -3078,7 +3170,8 @@ if __name__ == "__main__":
                 RUNNING_SYMBOL["value"] = next(iter(bots))
 
             for bot in bots.values():
-                _sync_bot_settings(bot, control)
+                if not control.get("_uninitialized"):
+                    _sync_bot_settings(bot, control)
 
             hist_bits = []
             for b in bots.values():
