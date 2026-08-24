@@ -1936,6 +1936,7 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .coin-actions .password-input { flex:1; min-width:90px; margin:0; padding:8px 10px; font-size:12px; }
 
   .control { margin:28px 20px 0; }
+  .control-stats { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px; }
   .control-heading { display:flex; align-items:baseline; justify-content:space-between;
     margin-bottom:14px; padding:0 2px; }
   .control-title { font-size:15px; font-weight:700; }
@@ -2034,7 +2035,9 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
     </div>
     ${coin_cards_html}
 <section class="control">
-
+<div class="control-stats">
+${control_cards_html}
+</div>
 <div class="control-heading">
 <div class="control-title">ควบคุมบอท</div>
 <div class="control-heading-sub">บันทึกแล้วมีผลทันที</div>
@@ -2406,10 +2409,12 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             value_class="positive" if daily_pnl >= 0 else "negative",
         ),
         _render_card("ทุนเริ่มต้นวันนี้", f"{_fmt_thb(daily_start)} ฿"),
-        _render_card("ขาดทุนติดกัน", f"{consecutive_losses} / {active_max_consecutive_losses} ไม้"),
-        _render_card("เหรียญในรายการ", f"{len(watchlist)} ตัว", sub=f"ถือได้สูงสุด {max_open} ช่อง", value_class="accent"),
     ]
     cards_html = "".join(cards)
+    control_cards_html = "".join([
+        _render_card("ขาดทุนติดกัน", f"{consecutive_losses} / {active_max_consecutive_losses} ไม้"),
+        _render_card("เหรียญในรายการ", f"{len(watchlist)} ตัว", sub=f"ถือได้สูงสุด {max_open} ช่อง", value_class="accent"),
+    ])
 
     password_field_html = ""
     password_field_inline = ""
@@ -2595,6 +2600,7 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         progress_html=progress_html,
         cards_html=cards_html,
         coin_cards_html=coin_cards_html,
+        control_cards_html=control_cards_html,
         unlock_button_html=unlock_button_html,
         pause_sub=pause_sub,
         paused_checked=paused_checked,
