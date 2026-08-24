@@ -84,19 +84,60 @@ def init_firebase():
         logger.error(f"Firebase Init Error: {e}")
 
 
+def firebase_call(fn, timeout=12, what="Firebase"):
+    """กันบอท/หน้าเว็บค้างเงียบถ้า Firebase ไม่ตอบ"""
+    box = {"done": False, "value": None, "error": None}
+
+    def _run():
+        try:
+            box["value"] = fn()
+        except Exception as e:
+            box["error"] = e
+        finally:
+            box["done"] = True
+
+    worker = threading.Thread(target=_run, daemon=True, name=f"fb-{what}")
+    worker.start()
+    worker.join(timeout)
+    if not box["done"]:
+        raise TimeoutError(f"{what} ไม่ตอบใน {timeout} วินาที")
+    if box["error"] is not None:
+        raise box["error"]
+    return box["value"]
+
+
+class _TimedFirebaseRef:
+    def __init__(self, ref, label):
+        self._ref = ref
+        self._label = label
+
+    def get(self):
+        return firebase_call(self._ref.get, what=f"{self._label}.get")
+
+    def set(self, value):
+        return firebase_call(lambda: self._ref.set(value), what=f"{self._label}.set")
+
+    def update(self, value):
+        return firebase_call(lambda: self._ref.update(value), what=f"{self._label}.update")
+
+
 def primary_ref(path):
     """โหนดบนฐานหลัก (สถานะเทรด / ตั้งค่า)"""
-    return db.reference(path)
+    return _TimedFirebaseRef(db.reference(path), f"DB1:{path}")
 
 
 def market_ref(path):
     """โหนดบนฐานที่ 2 ถ้ามี ไม่งั้นใช้ฐานหลักที่ path เดิม"""
     if _market_db_enabled:
         try:
-            return db.reference(path, app=firebase_admin.get_app(MARKET_APP_NAME))
+            return _TimedFirebaseRef(
+                db.reference(path, app=firebase_admin.get_app(MARKET_APP_NAME)),
+                f"DB2:{path}",
+            )
         except Exception as e:
             logger.warning(f"ใช้ DB2 ไม่ได้ ถอยไปฐานหลัก: {e}")
-    return db.reference(path)
+    return _TimedFirebaseRef(db.reference(path), f"DB1:{path}")
+
 
 
 def market_db_ready():
@@ -114,7 +155,7 @@ def load_symbol_view(symbol):
     except Exception:
         market = {}
     if market.get("price_history"):
-        state["price_history"] = market["price_history"]
+        state["price_history"] = trim_to_continuous_recent(market["price_history"])
     if market.get("quote"):
         state["quote"] = market["quote"]
     return state
@@ -146,6 +187,10 @@ RECENT_ORDER_LOOKBACK_SEC = 180
 MARKET_HISTORY_FLUSH_SEC = 15
 PRICE_TICK_MIN_INTERVAL_SEC = 15
 PRICE_TICK_MIN_MOVE_PERCENT = 0.05
+HISTORY_NEEDED_SEC = 7200          # ต้องมีราคาต่อเนื่อง 2 ชม. ก่อนซื้อ
+HISTORY_KEEP_SEC = 10800           # เก็บย้อนหลัง 3 ชม.
+HISTORY_GAP_BREAK_SEC = 600        # ขาดเกิน 10 นาที = เริ่มสะสมใหม่ (กันประวัติเก่าตอนย้ายเครื่อง)
+PRICE_OFFSET_TOLERANCE_SEC = 300
 _SYMBOL_CATALOG = {"ts": 0.0, "symbols": None}
 _SHUTDOWN_HANDLERS_INSTALLED = False
 
@@ -413,6 +458,40 @@ def should_append_price_tick(history, now, price, min_interval=PRICE_TICK_MIN_IN
     return False
 
 
+def trim_to_continuous_recent(history, now=None, max_gap_sec=HISTORY_GAP_BREAK_SEC):
+    """เก็บเฉพาะช่วงราคาต่อเนื่องล่าสุด ทิ้งข้อมูลเก่าก่อนรูที่เกิดตอนบอทดับ/ย้ายเครื่อง"""
+    if not history:
+        return []
+    now = time.time() if now is None else now
+    cleaned = []
+    for item in history:
+        try:
+            ts = float(item[0])
+            px = float(item[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        cleaned.append([ts, px])
+    if not cleaned:
+        return []
+    cleaned.sort(key=lambda t: t[0])
+    if now - cleaned[-1][0] > max_gap_sec:
+        return []
+    cut = 0
+    for i in range(len(cleaned) - 1, 0, -1):
+        if cleaned[i][0] - cleaned[i - 1][0] > max_gap_sec:
+            cut = i
+            break
+    return cleaned[cut:]
+
+
+def history_elapsed_sec(history, now=None, max_gap_sec=HISTORY_GAP_BREAK_SEC):
+    hist = trim_to_continuous_recent(history, now=now, max_gap_sec=max_gap_sec)
+    if not hist:
+        return 0.0
+    now = time.time() if now is None else now
+    return max(0.0, now - hist[0][0])
+
+
 def signed_request(api_key, api_secret, method, path, query="", body=None,
                    timeout_sec=10, max_retries=3, allow_retry=True,
                    host="api.innovestxonline.com", _retry_count=0):
@@ -617,11 +696,18 @@ def _normalize_watchlist(raw, fallback_symbol):
     return []
 
 
+_CONTROL_CACHE = {"value": None}
+
+
 def load_control():
     """อ่านคำสั่งควบคุมล่าสุดจากหน้าเว็บ (รายการเหรียญที่เฝ้า, หยุดชั่วคราว, ความเสี่ยง, จำนวนช่องถือพร้อมกัน)"""
     try:
         data = primary_ref("bot_control").get() or {}
     except Exception as e:
+        cached = _CONTROL_CACHE.get("value")
+        if cached is not None:
+            logger.warning(f"อ่าน bot_control จาก Firebase ไม่ได้ ใช้ค่าล่าสุดที่อ่านได้: {e}")
+            return dict(cached)
         logger.warning(f"อ่าน bot_control จาก Firebase ไม่ได้ ใช้ค่าเริ่มต้น: {e}")
         data = {}
 
@@ -683,7 +769,7 @@ def load_control():
             if sym in paused_symbols:
                 pause_reasons[sym] = str(value or "user")
 
-    return {
+    result = {
         "active_symbol": watchlist[0] if watchlist else fallback_symbol,
         "watchlist": watchlist,
         "paused": bool(data.get("paused", False)),
@@ -697,6 +783,8 @@ def load_control():
         "stop_loss_percent": stop_loss_percent,
         "unlock_requested": bool(data.get("unlock_requested", False)),
     }
+    _CONTROL_CACHE["value"] = result
+    return result
 
 
 def save_control(control):
@@ -893,6 +981,13 @@ class InnovestXTradingBot:
         if not hist and self.state.get("price_history"):
             hist = self.state["price_history"]
             logger.info(f"[{self.symbol}] ย้ายประวัติราคาจากฐานหลักไป path ตลาด")
+        raw_len = len(hist) if hist else 0
+        hist = trim_to_continuous_recent(hist)
+        if raw_len and len(hist) < raw_len:
+            logger.info(
+                f"[{self.symbol}] ทิ้งประวัติราคาที่ขาดช่วง {raw_len - len(hist)} จุด "
+                f"— เริ่มสะสมใหม่ (แถบรอ 2 ชม. จะกลับมา)"
+            )
         self.state["price_history"] = hist
         if quote:
             self.state["quote"] = quote
@@ -1012,17 +1107,18 @@ class InnovestXTradingBot:
 
     def _record_price_tick(self, price):
         now = time.time()
-        hist = self.state.get("price_history") or []
+        hist = trim_to_continuous_recent(self.state.get("price_history") or [], now)
         if should_append_price_tick(hist, now, price):
             hist.append([now, price])
-            cutoff = now - 10800  # เก็บย้อนหลังแค่ 3 ชั่วโมงพอสำหรับกลยุทธ์
+            cutoff = now - HISTORY_KEEP_SEC
             self.state["price_history"] = [t for t in hist if t[0] >= cutoff]
             self.save_market(force_history=False)
         else:
             # ราคาไม่ขยับพอ — อัปเดตแค่ quote ไม่เขียนประวัติทั้งก้อน
+            self.state["price_history"] = hist
             self.save_market(force_history=False)
 
-    def _price_at_offset(self, seconds_ago, tolerance_sec=300):
+    def _price_at_offset(self, seconds_ago, tolerance_sec=PRICE_OFFSET_TOLERANCE_SEC):
         history = self.state["price_history"]
         if not history:
             return None
@@ -1033,10 +1129,7 @@ class InnovestXTradingBot:
         return closest[1]
 
     def _has_enough_history(self):
-        history = self.state["price_history"]
-        if not history:
-            return False
-        return (time.time() - history[0][0]) >= 7200  # อย่างน้อย 2 ชั่วโมง
+        return history_elapsed_sec(self.state.get("price_history") or []) >= HISTORY_NEEDED_SEC
 
     def _trend_confidence(self, current_price, price_1h_ago, price_2h_ago, price_3h_ago):
         """wrapper ไว้ให้โค้ดเก่าที่เรียกอยู่ — สูตรจริงอยู่ที่ evaluate_entry_signal()"""
@@ -1507,13 +1600,18 @@ class InnovestXTradingBot:
             "net_2h": None,
             "vetoed": False,
             "reason": "unknown",
+            "elapsed": 0.0,
         }
         if current_price is None:
             empty["reason"] = "no_price"
             return empty
 
+        empty["elapsed"] = history_elapsed_sec(self.state.get("price_history") or [])
         if not self._has_enough_history():
-            logger.info(f"[{self.symbol}] ข้อมูลราคาย้อนหลังยังไม่ครบ 2 ชั่วโมง รอสะสมข้อมูลต่อ")
+            minutes = int(empty["elapsed"] // 60)
+            logger.info(
+                f"[{self.symbol}] รอสะสมข้อมูลราคาต่อเนื่อง {minutes}/120 นาที"
+            )
             empty["reason"] = "waiting_history"
             return empty
 
@@ -1522,8 +1620,11 @@ class InnovestXTradingBot:
         price_3h_ago = self._price_at_offset(10800)
 
         if price_1h_ago is None or price_2h_ago is None:
-            logger.info(f"[{self.symbol}] ข้อมูลราคาบางช่วงขาดหาย (gap) รอรอบถัดไป")
-            empty["reason"] = "gap"
+            minutes = int(empty["elapsed"] // 60)
+            logger.info(
+                f"[{self.symbol}] ข้อมูล 1–2 ชม.ยังไม่ครบ รอสะสมต่อ ({minutes}/120 นาที)"
+            )
+            empty["reason"] = "waiting_history"
             return empty
 
         signal = evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
@@ -2198,15 +2299,16 @@ def _trend_from_state(state):
         "vetoed": False,
         "reason": "unknown",
     }
-    history = state.get("price_history") or []
+    history = trim_to_continuous_recent(state.get("price_history") or [])
     if not history:
+        empty["reason"] = "waiting_history"
         return empty
     current = history[-1][1]
     now = time.time()
     empty["current"] = current
-    empty["elapsed"] = max(0.0, now - history[0][0])
+    empty["elapsed"] = history_elapsed_sec(history, now)
 
-    def price_at(seconds_ago, tolerance=300):
+    def price_at(seconds_ago, tolerance=PRICE_OFFSET_TOLERANCE_SEC):
         target = now - seconds_ago
         closest = min(history, key=lambda t: abs(t[0] - target))
         if abs(closest[0] - target) > tolerance:
@@ -2216,7 +2318,7 @@ def _trend_from_state(state):
     p1 = price_at(3600)
     p2 = price_at(7200)
     p3 = price_at(10800)
-    if empty["elapsed"] < 7200:
+    if empty["elapsed"] < HISTORY_NEEDED_SEC or p1 is None or p2 is None:
         empty["reason"] = "waiting_history"
         if p1 and current:
             empty["change_1h"] = _pct_change(current, p1) or 0.0
@@ -2273,7 +2375,8 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             ts = hist[-1][0]
             if newest_ts is None or ts > newest_ts:
                 newest_ts = ts
-            if (now - hist[0][0]) < 7200 and st.get("status") != "HOLDING":
+            elapsed = history_elapsed_sec(hist, now)
+            if elapsed < HISTORY_NEEDED_SEC and st.get("status") != "HOLDING":
                 waiting_history += 1
         elif st.get("status") != "HOLDING":
             waiting_history += 1
@@ -2375,20 +2478,21 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
     progress_html = ""
     if waiting_history and holding_count == 0:
         # แสดงความคืบหน้าของเหรียญที่ช้าที่สุด
-        slowest_elapsed = 7200
+        slowest_elapsed = HISTORY_NEEDED_SEC
         slowest_has_hist = False
         for sym in watchlist:
             st = states_by_symbol.get(sym) or {}
             hist = st.get("price_history") or []
-            if hist:
+            elapsed = history_elapsed_sec(hist, now)
+            if hist and elapsed > 0:
                 slowest_has_hist = True
-                slowest_elapsed = min(slowest_elapsed, max(0.0, now - hist[0][0]))
+                slowest_elapsed = min(slowest_elapsed, elapsed)
             else:
                 slowest_elapsed = 0.0
                 slowest_has_hist = False
                 break
-        if slowest_elapsed < 7200:
-            pct = min(100, slowest_elapsed / 7200 * 100)
+        if slowest_elapsed < HISTORY_NEEDED_SEC:
+            pct = min(100, slowest_elapsed / HISTORY_NEEDED_SEC * 100)
             minutes_done = int(slowest_elapsed // 60)
             minutes_left = max(0, 120 - minutes_done)
             sub = (
@@ -2476,7 +2580,7 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             chips.append(f'<span class="chip up">ขาขึ้น {confidence}%</span>')
         elif direction == "down":
             chips.append('<span class="chip down">ขาลง</span>')
-        if elapsed and elapsed < 7200 and status != "HOLDING":
+        if elapsed and elapsed < HISTORY_NEEDED_SEC and status != "HOLDING":
             chips.append(f'<span class="chip">รอข้อมูล {int(elapsed // 60)}/120 นาที</span>')
         if change_1h:
             chips.append(f'<span class="chip {"up" if change_1h >= 0 else "down"}">1 ชม. {change_1h:+.2f}%</span>')
@@ -2504,7 +2608,7 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
                 sub = f"ต้นทุน {entry_txt} ฿ · ดูแลด้วย trailing / stop loss แบบเดิม"
         elif status == "HALTED":
             sub = "ยังดึงราคาไม่ได้ — บอทจะถือต่อเองเมื่อมีราคาตลาด แล้วขายได้ ไม่ต้องรอปลดจากเว็บ"
-        elif elapsed and elapsed < 7200:
+        elif elapsed and elapsed < HISTORY_NEEDED_SEC:
             sub = "รอข้อมูลครบ 2 ชั่วโมงก่อนเริ่มประเมินเข้าซื้อ"
         else:
             reason_th = REASON_TH.get(trend.get("reason"), "")
@@ -2947,148 +3051,165 @@ if __name__ == "__main__":
     )
 
     stop_all = False
+    n_cycle = 0
     while not stop_all:
-        control = load_control()
-        wanted = list(control.get("watchlist") or [])
+        n_cycle += 1
+        try:
+            control = load_control()
+            wanted = list(control.get("watchlist") or [])
 
-        for sym in wanted:
-            get_or_create_bot(sym)
+            for sym in wanted:
+                get_or_create_bot(sym)
 
-        for sym in list(bots.keys()):
-            if sym in wanted:
-                continue
-            bot = bots[sym]
-            if bot.state.get("status") == "HOLDING" or float(bot.state.get("quantity", 0) or 0) > 0:
-                logger.info(f"มีคำขอเอา {sym} ออกจากรายการ แต่ยังถืออยู่ — รอขายก่อน แล้วค่อยเลิกเฝ้า")
-            else:
-                logger.info(f"เลิกเฝ้า {sym} ตามคำสั่งจากหน้าเว็บ")
-                del bots[sym]
-
-        RUNNING_WATCHLIST["value"] = list(bots.keys())
-        if wanted:
-            RUNNING_SYMBOL["value"] = wanted[0]
-        elif bots:
-            RUNNING_SYMBOL["value"] = next(iter(bots))
-
-        for bot in bots.values():
-            _sync_bot_settings(bot, control)
-
-        if control["unlock_requested"]:
-            risk = load_shared_risk()
-            if risk.get("status") == "HALTED":
-                logger.info("ปลดล็อกบอทตามคำขอจากหน้าเว็บ: HALTED -> IDLE (รีเซ็ตขาดทุนติดกันเป็น 0)")
-                risk["status"] = "IDLE"
-                risk["consecutive_losses"] = 0
-                save_shared_risk(risk)
-            resume_failed = False
-            for bot in bots.values():
-                if bot.state.get("status") == "HALTED":
-                    if not bot.resume_from_halt():
-                        resume_failed = True
-            if not resume_failed:
-                control["unlock_requested"] = False
-                save_control(control)
-            else:
-                logger.warning("ปลด HALTED บางเหรียญไม่สำเร็จ — จะลองใหม่ในรอบถัดไป")
-
-        if bots:
-            maybe_reset_shared_daily(bots)
-
-        if not bots:
-            logger.info("รายการเฝ้าว่าง — รอเพิ่มเหรียญจากหน้าเว็บ")
-        elif control["paused"]:
-            logger.info("บอทหยุดชั่วคราว (สั่งโดยผู้ใช้ผ่านหน้าเว็บ) — ไม่เปิดออเดอร์ซื้อใหม่ แต่ยังดูแลไม้ที่ถืออยู่ (stop loss / trailing)")
-            for bot in bots.values():
-                try:
-                    px = bot.poll_price()
-                    if px is None:
-                        continue
-                    if bot.state.get("status") == "HALTED":
-                        bot.resume_from_halt()
-                    if bot.state.get("status") == "HOLDING":
-                        bot.run_strategy(px)
-                except Exception:
-                    logger.exception(f"[{bot.symbol}] ดึงราคา/ดูแลโพซิชันตอนหยุดชั่วคราวล้มเหลว")
-        else:
-            prices = {}
-            for bot in bots.values():
-                try:
-                    prices[bot.symbol] = bot.poll_price()
-                except Exception:
-                    logger.exception(f"[{bot.symbol}] ดึงราคาล้มเหลว")
-                time.sleep(0.2)
-
-            for bot in bots.values():
-                px = prices.get(bot.symbol)
-                if px is None:
+            for sym in list(bots.keys()):
+                if sym in wanted:
                     continue
-                if bot.state.get("status") == "HALTED":
-                    try:
-                        bot.resume_from_halt()
-                    except Exception:
-                        logger.exception(f"[{bot.symbol}] ปลด HALTED อัตโนมัติล้มเหลว")
-                if bot.state.get("status") == "HOLDING":
-                    try:
-                        bot.run_strategy(px)
-                    except Exception:
-                        logger.exception(f"[{bot.symbol}] ดูแลโพซิชันล้มเหลว")
+                bot = bots[sym]
+                if bot.state.get("status") == "HOLDING" or float(bot.state.get("quantity", 0) or 0) > 0:
+                    logger.info(f"มีคำขอเอา {sym} ออกจากรายการ แต่ยังถืออยู่ — รอขายก่อน แล้วค่อยเลิกเฝ้า")
+                else:
+                    logger.info(f"เลิกเฝ้า {sym} ตามคำสั่งจากหน้าเว็บ")
+                    del bots[sym]
 
-            risk = load_shared_risk()
-            holding_count = sum(1 for b in bots.values() if b.state.get("status") == "HOLDING")
-            slots = int(control["max_open_positions"]) - holding_count
+            RUNNING_WATCHLIST["value"] = list(bots.keys())
+            if wanted:
+                RUNNING_SYMBOL["value"] = wanted[0]
+            elif bots:
+                RUNNING_SYMBOL["value"] = next(iter(bots))
 
-            if risk.get("status") == "HALTED":
-                logger.warning("บัญชีถูก HALTED จาก Circuit Breaker — ไม่เปิดออเดอร์ซื้อใหม่ (โพซิชันที่ถืออยู่ยังถูกดูแล)")
-            elif slots <= 0:
-                logger.info(f"ถือครบ {holding_count}/{control['max_open_positions']} ช่อง — รอขายก่อนจึงมองหาเหรียญถัดไป")
-            else:
-                candidates = []
+            for bot in bots.values():
+                _sync_bot_settings(bot, control)
+
+            hist_bits = []
+            for b in bots.values():
+                elapsed = history_elapsed_sec(b.state.get("price_history") or [])
+                mins = int(elapsed // 60)
+                hist_bits.append(
+                    f"{b.symbol} {b.state.get('status')} {mins}/120น."
+                )
+            logger.info(
+                f"รอบที่ {n_cycle} เฝ้า {list(bots.keys()) or '-'} "
+                f"paused={bool(control.get('paused'))} | " + (" · ".join(hist_bits) or "ยังไม่มีเหรียญ")
+            )
+
+            if control["unlock_requested"]:
+                risk = load_shared_risk()
+                if risk.get("status") == "HALTED":
+                    logger.info("ปลดล็อกบอทตามคำขอจากหน้าเว็บ: HALTED -> IDLE (รีเซ็ตขาดทุนติดกันเป็น 0)")
+                    risk["status"] = "IDLE"
+                    risk["consecutive_losses"] = 0
+                    save_shared_risk(risk)
+                resume_failed = False
                 for bot in bots.values():
-                    if bot.state.get("status") != "IDLE":
-                        continue
+                    if bot.state.get("status") == "HALTED":
+                        if not bot.resume_from_halt():
+                            resume_failed = True
+                if not resume_failed:
+                    control["unlock_requested"] = False
+                    save_control(control)
+                else:
+                    logger.warning("ปลด HALTED บางเหรียญไม่สำเร็จ — จะลองใหม่ในรอบถัดไป")
+
+            if bots:
+                maybe_reset_shared_daily(bots)
+
+            if not bots:
+                logger.info("รายการเฝ้าว่าง — รอเพิ่มเหรียญจากหน้าเว็บ")
+            elif control["paused"]:
+                logger.info("บอทหยุดชั่วคราว (สั่งโดยผู้ใช้ผ่านหน้าเว็บ) — ไม่เปิดออเดอร์ซื้อใหม่ แต่ยังดูแลไม้ที่ถืออยู่ (stop loss / trailing)")
+                for bot in bots.values():
+                    try:
+                        px = bot.poll_price()
+                        if px is None:
+                            continue
+                        if bot.state.get("status") == "HALTED":
+                            bot.resume_from_halt()
+                        if bot.state.get("status") == "HOLDING":
+                            bot.run_strategy(px)
+                    except Exception:
+                        logger.exception(f"[{bot.symbol}] ดึงราคา/ดูแลโพซิชันตอนหยุดชั่วคราวล้มเหลว")
+            else:
+                prices = {}
+                for bot in bots.values():
+                    try:
+                        prices[bot.symbol] = bot.poll_price()
+                    except Exception:
+                        logger.exception(f"[{bot.symbol}] ดึงราคาล้มเหลว")
+                    time.sleep(0.2)
+
+                for bot in bots.values():
                     px = prices.get(bot.symbol)
                     if px is None:
                         continue
-                    try:
-                        signal = bot.analyze_trend(px)
-                    except Exception:
-                        logger.exception(f"[{bot.symbol}] วิเคราะห์เทรนด์ล้มเหลว")
-                        continue
-                    if signal.get("should_buy"):
-                        if is_watch_paused(bot.symbol, control):
-                            logger.info(
-                                f"[{bot.symbol}] สัญญาณขาขึ้นแต่หยุดเฝ้าอยู่ — ไม่ซื้อ "
-                                f"(กดเฝ้าต่อที่หน้าเว็บถ้าต้องการ)"
-                            )
+                    if bot.state.get("status") == "HALTED":
+                        try:
+                            bot.resume_from_halt()
+                        except Exception:
+                            logger.exception(f"[{bot.symbol}] ปลด HALTED อัตโนมัติล้มเหลว")
+                    if bot.state.get("status") == "HOLDING":
+                        try:
+                            bot.run_strategy(px)
+                        except Exception:
+                            logger.exception(f"[{bot.symbol}] ดูแลโพซิชันล้มเหลว")
+
+                risk = load_shared_risk()
+                holding_count = sum(1 for b in bots.values() if b.state.get("status") == "HOLDING")
+                slots = int(control["max_open_positions"]) - holding_count
+
+                if risk.get("status") == "HALTED":
+                    logger.warning("บัญชีถูก HALTED จาก Circuit Breaker — ไม่เปิดออเดอร์ซื้อใหม่ (โพซิชันที่ถืออยู่ยังถูกดูแล)")
+                elif slots <= 0:
+                    logger.info(f"ถือครบ {holding_count}/{control['max_open_positions']} ช่อง — รอขายก่อนจึงมองหาเหรียญถัดไป")
+                else:
+                    candidates = []
+                    for bot in bots.values():
+                        if bot.state.get("status") != "IDLE":
                             continue
-                        candidates.append((bot, px, signal))
+                        px = prices.get(bot.symbol)
+                        if px is None:
+                            continue
+                        try:
+                            signal = bot.analyze_trend(px)
+                        except Exception:
+                            logger.exception(f"[{bot.symbol}] วิเคราะห์เทรนด์ล้มเหลว")
+                            continue
+                        if signal.get("should_buy"):
+                            if is_watch_paused(bot.symbol, control):
+                                logger.info(
+                                    f"[{bot.symbol}] สัญญาณขาขึ้นแต่หยุดเฝ้าอยู่ — ไม่ซื้อ "
+                                    f"(กดเฝ้าต่อที่หน้าเว็บถ้าต้องการ)"
+                                )
+                                continue
+                            candidates.append((bot, px, signal))
 
-                candidates.sort(
-                    key=lambda item: (
-                        item[2]["confidence"],
-                        item[2].get("net_2h") or 0,
-                        item[2]["change_1h"],
-                    ),
-                    reverse=True,
-                )
-
-                for bot, px, signal in candidates:
-                    holding_count = sum(1 for b in bots.values() if b.state.get("status") == "HOLDING")
-                    remaining_slots = int(control["max_open_positions"]) - holding_count
-                    if remaining_slots <= 0:
-                        logger.info("ช่องถือเต็มแล้ว — เหรียญที่เหลือจะรอจนมีช่องว่างหลังขาย")
-                        break
-                    net_txt = f"{signal.get('net_2h'):+.2f}%" if signal.get("net_2h") is not None else "n/a"
-                    logger.info(
-                        f"[{bot.symbol}] สัญญาณขาขึ้น คะแนน {signal['confidence']}% "
-                        f"(ชม.1 {signal['change_1h']:+.2f}%, สุทธิ 2ชม. {net_txt}) — พยายามเข้าซื้อ "
-                        f"(แบ่งเงินจาก {remaining_slots} ช่องว่าง)"
+                    candidates.sort(
+                        key=lambda item: (
+                            item[2]["confidence"],
+                            item[2].get("net_2h") or 0,
+                            item[2]["change_1h"],
+                        ),
+                        reverse=True,
                     )
-                    try:
-                        bot.try_enter_position(px, available_slots=remaining_slots)
-                    except Exception:
-                        logger.exception(f"[{bot.symbol}] เข้าซื้อล้มเหลว")
-                    time.sleep(0.3)
+
+                    for bot, px, signal in candidates:
+                        holding_count = sum(1 for b in bots.values() if b.state.get("status") == "HOLDING")
+                        remaining_slots = int(control["max_open_positions"]) - holding_count
+                        if remaining_slots <= 0:
+                            logger.info("ช่องถือเต็มแล้ว — เหรียญที่เหลือจะรอจนมีช่องว่างหลังขาย")
+                            break
+                        net_txt = f"{signal.get('net_2h'):+.2f}%" if signal.get("net_2h") is not None else "n/a"
+                        logger.info(
+                            f"[{bot.symbol}] สัญญาณขาขึ้น คะแนน {signal['confidence']}% "
+                            f"(ชม.1 {signal['change_1h']:+.2f}%, สุทธิ 2ชม. {net_txt}) — พยายามเข้าซื้อ "
+                            f"(แบ่งเงินจาก {remaining_slots} ช่องว่าง)"
+                        )
+                        try:
+                            bot.try_enter_position(px, available_slots=remaining_slots)
+                        except Exception:
+                            logger.exception(f"[{bot.symbol}] เข้าซื้อล้มเหลว")
+                        time.sleep(0.3)
+        except Exception:
+            logger.exception(f"รอบที่ {n_cycle} ล้มเหลว — จะลองใหม่ในรอบถัดไป")
 
         for _ in range(POLL_INTERVAL_SEC):
             if STOP_ALL["value"] or any(b._stop_requested for b in bots.values()):

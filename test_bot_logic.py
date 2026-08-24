@@ -565,6 +565,57 @@ class WatchPauseTests(unittest.TestCase):
             self.assertFalse(bot.notify_telegram("hello"))
 
 
+class HistoryGapTests(unittest.TestCase):
+    def test_trim_drops_stale_segment_before_downtime_hole(self):
+        now = 2_000_000.0
+        old = [[now - 10800, 100.0], [now - 7200, 101.0]]
+        hole_then_new = old + [[now - 30, 102.0], [now - 15, 102.2]]
+        trimmed = bot.trim_to_continuous_recent(hole_then_new, now=now, max_gap_sec=600)
+        self.assertEqual(len(trimmed), 2)
+        self.assertEqual(trimmed[0][1], 102.0)
+        elapsed = bot.history_elapsed_sec(hole_then_new, now=now, max_gap_sec=600)
+        self.assertLess(elapsed, 60)
+
+    def test_trim_keeps_continuous_two_hours(self):
+        now = 2_000_000.0
+        hist = [[now - 7200 + i * 15, 100.0 + i * 0.01] for i in range(0, 480)]
+        trimmed = bot.trim_to_continuous_recent(hist, now=now, max_gap_sec=600)
+        self.assertEqual(len(trimmed), len(hist))
+        self.assertGreaterEqual(bot.history_elapsed_sec(hist, now=now), 7190)
+
+    def test_stale_history_counts_as_waiting_on_dashboard(self):
+        now = time.time()
+        # ประวัติเก่า 3 ชม. แต่มีรูตอนย้ายเครื่อง — หน้าเว็บต้องโชว์แถบรอ ไม่ใช่คิดว่าครบแล้ว
+        state = {
+            "status": "IDLE",
+            "price_history": [
+                [now - 10800, 100.0],
+                [now - 9000, 101.0],
+                [now - 20, 102.0],
+            ],
+        }
+        trend = bot._trend_from_state(state)
+        self.assertEqual(trend["reason"], "waiting_history")
+        self.assertLess(trend["elapsed"], 120)
+        html = bot.render_dashboard(
+            ["BTCTHB"],
+            {"BTCTHB": state},
+            {
+                "watchlist": ["BTCTHB"],
+                "paused": False,
+                "max_open_positions": 3,
+                "max_consecutive_losses": 3,
+                "max_daily_loss_percent": 5,
+                "trade_size_percent": 10,
+                "trailing_stop_percent": 1,
+                "stop_loss_percent": 3,
+            },
+            {},
+        )
+        self.assertIn("กำลังสะสมข้อมูลราคา", html)
+        self.assertIn("รอข้อมูล", html)
+
+
 if __name__ == "__main__":
     unittest.main()
 
