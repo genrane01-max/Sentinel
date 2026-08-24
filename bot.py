@@ -1,18 +1,21 @@
 """
 InnovestX Automated Trading Bot — Price Action 2H Strategy
-(v7, เข้าซื้อด้วย 2 ชม.เป็นหลัก / ชม.3 ห้ามซื้อถ้าลงแรง / bid-offer ลงฐานที่ 2)
+(v8, เข้าซื้อด้วย 2 ชม.เป็นหลัก + สัญญาณเริ่มต้น 15 นาที / ชม.3 ห้ามซื้อถ้าลงแรง / bid-offer ลงฐานที่ 2)
 
-ของใหม่ในเวอร์ชันนี้:
-1. สูตรเข้าซื้อใช้ 2 ชั่วโมงเป็นหลัก (ชม.1 + ชม.2 ต้องขึ้น, สุทธิ 2 ชม. ต้องบวก)
-2. ชม.ที่ 3 ไม่ยืนยันซื้อแล้ว — ใช้แค่ห้ามซื้อถ้าลงแรงเกิน −1.5%
-3. แยก Firebase: ฐานหลัก = สถานะเทรด/ตั้งค่า, ฐานที่ 2 = bid/offer + ประวัติราคา
-4. ตัดสินใจซื้อเทียบ offer (ask), ขายเทียบ bid, กันสเปรดกว้าง
-5. แดชบอร์ดใช้สูตรเดียวกับบอท
-6. มีเหรียญแต่ยืนยันราคาจับคู่ไม่ได้ — ถือต่อทันทีด้วยต้นทุนประมาณ แล้วขาย/trailing ได้เลย ไม่รอปลดจากเว็บ
-7. แจ้งเตือน Telegram + หยุดเฝ้าต่อเหรียญหลังตัดขาดทุน (กดเฝ้าต่อเองจากหน้าเว็บ)
+ของใหม่ในเวอร์ชันนี้ (v8):
+1. เพิ่ม "สัญญาณเริ่มต้น" — เช็ค 15 นาทีล่าสุดว่าขึ้นเร็วกว่า 15 นาทีก่อนหน้า (โมเมนตัมกำลังเร่ง)
+   ใช้ควบคู่กับสูตรเดิม ไม่ต้องรอครบ 2 ชม.เต็ม แค่มีข้อมูล 30 นาทีก็เข้าซื้อได้แล้ว
+   ยังกันด้วยสเปรดกว้าง + ชม.3 veto เหมือนเดิม เข้าซื้อไม้ขนาดปกติเท่ากันทุกครั้ง ไม่มีไม้เล็ก/ไม้ใหญ่
+2. แดชบอร์ดแสดงชิป "15 นาที" และ "พร้อมซื้อ (เริ่มต้น)" แยกจากสัญญาณสูตรหลัก
 
-ของเดิมยังอยู่ครบ: แดชบอร์ด, หยุด/เริ่มเทรด, รหัสผ่าน, % ขาดทุนต่อวัน, อัตราเงินต่อไม้,
-จำนวนไม้ขาดทุนติดกัน, price_history ต่อเหรียญ, ค่าธรรมเนียม, circuit breaker, Decimal, graceful shutdown
+ของเดิมจาก v7 ยังอยู่ครบ:
+1. สูตรเข้าซื้อ 2 ชั่วโมงเป็นหลัก (ชม.1 + ชม.2 ต้องขึ้น, สุทธิ 2 ชม. ต้องบวก) ชม.3 ใช้แค่ห้ามซื้อถ้าลงแรงเกิน −1.5%
+2. แยก Firebase: ฐานหลัก = สถานะเทรด/ตั้งค่า, ฐานที่ 2 = bid/offer + ประวัติราคา
+3. ตัดสินใจซื้อเทียบ offer (ask), ขายเทียบ bid, กันสเปรดกว้าง
+4. มีเหรียญแต่ยืนยันราคาจับคู่ไม่ได้ — ถือต่อทันทีด้วยต้นทุนประมาณ แล้วขาย/trailing ได้เลย ไม่รอปลดจากเว็บ
+5. แจ้งเตือน Telegram + หยุดเฝ้าต่อเหรียญหลังตัดขาดทุน (กดเฝ้าต่อเองจากหน้าเว็บ)
+6. แดชบอร์ด, หยุด/เริ่มเทรด, รหัสผ่าน, % ขาดทุนต่อวัน, อัตราเงินต่อไม้, จำนวนไม้ขาดทุนติดกัน,
+   price_history ต่อเหรียญ, ค่าธรรมเนียม, circuit breaker, Decimal, graceful shutdown
 """
 
 import time
@@ -200,6 +203,12 @@ MIN_CHANGE_1H_PERCENT = 0.5      # ชม.ล่าสุดต้องขึ�
 MIN_NET_2H_PERCENT = 0.7         # สุทธิ 2 ชม. ต้องบวกจริง
 MAX_CHANGE_1H_PERCENT = 2.5      # ชม.ล่าสุดพุ่งเกินนี้ = ไล่หัว ไม่ซื้อ
 HOUR3_VETO_PERCENT = -1.5        # ชม.3 ลงแรงกว่านี้ = ขาลงใหญ่ยังไม่จบ ห้ามซื้อ
+
+# สัญญาณเริ่มต้น (v8): เช็คว่า 15 นาทีล่าสุดขึ้นเร็วกว่า 15 นาทีก่อนหน้า (โมเมนตัมกำลังเร่ง)
+# ใช้ควบคู่กับสูตร 1-2 ชม.เดิม ไม่ต้องรอครบ 2 ชม.เต็มถึงจะซื้อได้ — แต่เข้าไม้ขนาดปกติเหมือนกันทุกครั้ง ไม่มีไม้เล็ก/ไม้ใหญ่
+EARLY_MOMENTUM_MIN_15M_PERCENT = 0.15   # ขึ้นอย่างน้อยเท่านี้ใน 15 นาทีล่าสุด ถึงเริ่มพิจารณา (กันสัญญาณรบกวน/ราคาสั่นเล็กน้อย)
+EARLY_MOMENTUM_MAX_15M_PERCENT = 1.2    # ขึ้นเกินนี้ใน 15 นาที = แรงเกินไป กันไล่หัว ปล่อยให้สูตร 1-2 ชม.เดิมตัดสินแทน
+EARLY_MOMENTUM_MIN_HISTORY_SEC = 1800   # ต้องมีราคาต่อเนื่องอย่างน้อย 30 นาที ก่อนเริ่มเช็คสัญญาณนี้ (เทียบ 15 นาทีล่าสุด vs 15 นาทีก่อนหน้า)
 # คะแนนสะสม: ชม.1 ผ่าน +50, ชม.2 ขึ้น +30, สุทธิ 2 ชม.ผ่าน +20, ชม.2 ลงหักเหลือ ~10
 # ซื้อเมื่อ confidence >= MIN_CONFIDENCE_TO_BUY และไม่โดน veto (ไล่หัว / ชม.3 ลงแรง)
 MIN_CONFIDENCE_TO_BUY = 80
@@ -383,6 +392,62 @@ def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ag
     result["confidence"] = confidence
     result["should_buy"] = confidence >= MIN_CONFIDENCE_TO_BUY
     result["reason"] = None if result["should_buy"] else (reason or "weak")
+    return result
+
+
+def evaluate_early_momentum_signal(current_price, price_15m_ago, price_30m_ago,
+                                     price_2h_ago=None, price_3h_ago=None):
+    """สัญญาณเริ่มต้น (v8) — ใช้ควบคู่กับ evaluate_entry_signal() ไม่ใช่แทนที่
+
+    เช็คว่า 15 นาทีล่าสุดขึ้นเร็วกว่า 15 นาทีก่อนหน้า (โมเมนตัมกำลังเร่งตัวขึ้น)
+    ไม่ต้องรอครบ 2 ชม.เต็มเหมือนสูตรหลัก — แค่มีข้อมูลต่อเนื่อง 30 นาทีก็เช็คได้แล้ว
+    ยังกันด้วย ชม.3 veto เหมือนสูตรหลักถ้ามีข้อมูลพอ (กันซื้อตอนขาลงใหญ่ยังไม่จบ)
+    เข้าซื้อด้วยขนาดไม้ปกติเท่ากันทุกครั้ง ไม่มีการแบ่งไม้เล็ก/ไม้ใหญ่
+    """
+    result = {
+        "should_buy": False,
+        "change_15m": None,
+        "change_prev_15m": None,
+        "vetoed": False,
+        "reason": "early_no_price",
+    }
+    if current_price is None or price_15m_ago is None or price_15m_ago == 0:
+        return result
+
+    change_15m = _pct_change(current_price, price_15m_ago)
+    result["change_15m"] = change_15m
+    if change_15m is None or change_15m <= 0:
+        result["reason"] = "early_flat_or_down"
+        return result
+    if change_15m < EARLY_MOMENTUM_MIN_15M_PERCENT:
+        result["reason"] = "early_too_weak"
+        return result
+    if change_15m > EARLY_MOMENTUM_MAX_15M_PERCENT:
+        result["reason"] = "early_chase"
+        return result
+
+    if price_30m_ago is None or price_30m_ago == 0:
+        result["reason"] = "early_gap"
+        return result
+    change_prev_15m = _pct_change(price_15m_ago, price_30m_ago)
+    result["change_prev_15m"] = change_prev_15m
+    if change_prev_15m is None:
+        result["reason"] = "early_gap"
+        return result
+    if change_15m <= change_prev_15m:
+        result["reason"] = "early_not_accelerating"
+        return result
+
+    # ชม.3 veto เหมือนสูตรหลัก — เช็คได้เฉพาะตอนมีข้อมูล 2-3 ชม.ย้อนหลังแล้วเท่านั้น
+    if price_2h_ago is not None and price_3h_ago is not None:
+        change_3h = _pct_change(price_2h_ago, price_3h_ago)
+        if change_3h is not None and change_3h < HOUR3_VETO_PERCENT:
+            result["vetoed"] = True
+            result["reason"] = "hour3_veto"
+            return result
+
+    result["should_buy"] = True
+    result["reason"] = None
     return result
 
 
@@ -685,6 +750,12 @@ REASON_TH = {
     "weak": "คะแนนยังไม่ถึงเกณฑ์",
     "waiting_history": "รอสะสมข้อมูล 2 ชั่วโมง",
     "unknown": "ยังประเมินไม่ได้",
+    "early_no_price": "ยังไม่มีราคา (สัญญาณเริ่มต้น)",
+    "early_flat_or_down": "15 นาทีล่าสุดยังไม่ขึ้น",
+    "early_too_weak": f"15 นาทีล่าสุดขึ้นไม่ถึง {EARLY_MOMENTUM_MIN_15M_PERCENT}%",
+    "early_chase": f"15 นาทีล่าสุดพุ่งเกิน {EARLY_MOMENTUM_MAX_15M_PERCENT}% — กันไล่หัว",
+    "early_gap": "ข้อมูล 15/30 นาทีย้อนหลังยังไม่ครบ",
+    "early_not_accelerating": "ขึ้นอยู่ แต่โมเมนตัมยังไม่เร่งจาก 15 นาทีก่อนหน้า",
 }
 
 
@@ -1656,7 +1727,12 @@ class InnovestXTradingBot:
 
     # ==================== Strategy ====================
     def analyze_trend(self, current_price):
-        """ประเมินขาขึ้น/ลงด้วย Price Action 2H — ชม.3 ใช้แค่ห้ามซื้อ"""
+        """ประเมินขาขึ้น/ลงด้วย Price Action 2H + สัญญาณเริ่มต้น 15 นาที (v8)
+
+        มี 2 เส้นทางเข้าซื้อทำงานคู่กัน (ผ่านทางใดทางหนึ่งก็ซื้อได้ ขนาดไม้เท่ากันทุกครั้ง):
+        1) สูตรหลัก — ชม.1+ชม.2 ต้องขึ้น, สุทธิ 2 ชม.บวก, ชม.3 ใช้แค่ห้ามซื้อ (ต้องรอครบ 2 ชม.)
+        2) สัญญาณเริ่มต้น — 15 นาทีล่าสุดขึ้นเร็วกว่า 15 นาทีก่อนหน้า (เร่งตัว) ใช้ได้ตั้งแต่มีข้อมูล 30 นาที
+        """
         empty = {
             "ready": False,
             "should_buy": False,
@@ -1669,12 +1745,58 @@ class InnovestXTradingBot:
             "vetoed": False,
             "reason": "unknown",
             "elapsed": 0.0,
+            "change_15m": None,
+            "change_prev_15m": None,
+            "early_triggered": False,
         }
         if current_price is None:
             empty["reason"] = "no_price"
             return empty
 
-        empty["elapsed"] = history_elapsed_sec(self.state.get("price_history") or [])
+        history = self.state.get("price_history") or []
+        empty["elapsed"] = history_elapsed_sec(history)
+        quote = self.state.get("quote") or {}
+        spread = quote.get("spread_pct")
+        spread_wide = spread is not None and spread > MAX_SPREAD_PERCENT
+
+        # --- 1) สัญญาณเริ่มต้น: เช็คได้ตั้งแต่มีข้อมูลต่อเนื่อง >= 30 นาที ไม่ต้องรอครบ 2 ชม. ---
+        if empty["elapsed"] >= EARLY_MOMENTUM_MIN_HISTORY_SEC:
+            price_15m_ago = self._price_at_offset(900)
+            price_30m_ago = self._price_at_offset(1800)
+            price_2h_ago_v = self._price_at_offset(7200)
+            price_3h_ago_v = self._price_at_offset(10800)
+            early = evaluate_early_momentum_signal(
+                current_price, price_15m_ago, price_30m_ago,
+                price_2h_ago_v, price_3h_ago_v,
+            )
+            empty["change_15m"] = early["change_15m"]
+            empty["change_prev_15m"] = early["change_prev_15m"]
+
+            if early["should_buy"] and spread_wide:
+                early["should_buy"] = False
+                early["reason"] = "wide_spread"
+                logger.info(
+                    f"[{self.symbol}] สัญญาณเริ่มต้นเจอ แต่สเปรด {spread:.3f}% กว้างเกิน "
+                    f"{MAX_SPREAD_PERCENT}% — ไม่ซื้อ"
+                )
+
+            if early["should_buy"]:
+                logger.info(
+                    f"[{self.symbol}] 🔹 สัญญาณเริ่มต้น: 15 นาทีล่าสุด "
+                    f"{early['change_15m']:+.2f}% เร่งจาก 15 นาทีก่อนหน้า "
+                    f"{(early['change_prev_15m'] or 0):+.2f}% — เข้าซื้อไม้ปกติ"
+                )
+                empty.update({
+                    "ready": True,
+                    "should_buy": True,
+                    "direction": "up",
+                    "confidence": 60,  # ค่าคงที่สำหรับสัญญาณเริ่มต้น — ต่ำกว่าเกณฑ์ 80 ของสูตรหลัก
+                    "reason": None,    # ถ้ามีหลายเหรียญพร้อมซื้อพร้อมกัน สูตรหลักจะได้คิวก่อนตอนจัดลำดับ
+                    "early_triggered": True,
+                })
+                return empty
+
+        # --- 2) สูตรหลัก: ต้องรอครบ 2 ชม. ---
         if not self._has_enough_history():
             minutes = int(empty["elapsed"] // 60)
             logger.info(
@@ -1696,9 +1818,7 @@ class InnovestXTradingBot:
             return empty
 
         signal = evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
-        quote = self.state.get("quote") or {}
-        spread = quote.get("spread_pct")
-        if signal["should_buy"] and spread is not None and spread > MAX_SPREAD_PERCENT:
+        if signal["should_buy"] and spread_wide:
             signal["should_buy"] = False
             signal["reason"] = "wide_spread"
             logger.info(
@@ -1730,6 +1850,10 @@ class InnovestXTradingBot:
             "net_2h": signal["net_2h"],
             "vetoed": signal["vetoed"],
             "reason": signal["reason"],
+            "elapsed": empty["elapsed"],
+            "change_15m": empty["change_15m"],
+            "change_prev_15m": empty["change_prev_15m"],
+            "early_triggered": False,
         }
 
     def try_enter_position(self, current_price, available_slots=1):
@@ -2353,7 +2477,7 @@ def _render_card(label, value, sub="", value_class=""):
 
 
 def _trend_from_state(state):
-    """สูตรเดียวกับบอท: 2 ชม.เป็นหลัก ชม.3 แค่ห้ามซื้อ"""
+    """สูตรเดียวกับบอท (v8): 2 ชม.เป็นหลัก + สัญญาณเริ่มต้น 15 นาที ชม.3 แค่ห้ามซื้อ"""
     empty = {
         "direction": None,
         "confidence": 0,
@@ -2366,6 +2490,9 @@ def _trend_from_state(state):
         "should_buy": False,
         "vetoed": False,
         "reason": "unknown",
+        "change_15m": None,
+        "change_prev_15m": None,
+        "early_triggered": False,
     }
     history = trim_to_continuous_recent(state.get("price_history") or [])
     if not history:
@@ -2383,6 +2510,24 @@ def _trend_from_state(state):
             return None
         return closest[1]
 
+    if empty["elapsed"] >= EARLY_MOMENTUM_MIN_HISTORY_SEC:
+        p15 = price_at(900)
+        p30 = price_at(1800)
+        p2h_v = price_at(7200)
+        p3h_v = price_at(10800)
+        early = evaluate_early_momentum_signal(current, p15, p30, p2h_v, p3h_v)
+        empty["change_15m"] = early["change_15m"]
+        empty["change_prev_15m"] = early["change_prev_15m"]
+        if early["should_buy"]:
+            empty.update({
+                "should_buy": True,
+                "direction": "up",
+                "confidence": 60,
+                "reason": None,
+                "early_triggered": True,
+            })
+            return empty
+
     p1 = price_at(3600)
     p2 = price_at(7200)
     p3 = price_at(10800)
@@ -2394,6 +2539,9 @@ def _trend_from_state(state):
     signal = evaluate_entry_signal(current, p1, p2, p3)
     signal["current"] = current
     signal["elapsed"] = empty["elapsed"]
+    signal["change_15m"] = empty["change_15m"]
+    signal["change_prev_15m"] = empty["change_prev_15m"]
+    signal["early_triggered"] = False
     return signal
 
 
@@ -2619,6 +2767,8 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         change_1h = trend.get("change_1h") or 0.0
         change_2h = trend.get("change_2h")
         net_2h = trend.get("net_2h")
+        change_15m = trend.get("change_15m")
+        early_triggered = trend.get("early_triggered")
         elapsed = trend.get("elapsed") or 0.0
         is_paused = sym in paused_set
         holding_cls = " is-holding" if status == "HOLDING" else ""
@@ -2646,7 +2796,8 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         elif not is_paused:
             chips.append('<span class="chip" >เฝ้าอยู่</span>')
         if trend.get("should_buy") and status != "HOLDING" and not is_paused:
-            chips.append('<span class="chip up">พร้อมซื้อ</span>')
+            label = "พร้อมซื้อ (เริ่มต้น)" if early_triggered else "พร้อมซื้อ"
+            chips.append(f'<span class="chip up">{label}</span>')
         elif trend.get("vetoed"):
             chips.append('<span class="chip down">ชม.3 ห้ามซื้อ</span>')
         if direction == "up":
@@ -2655,6 +2806,8 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             chips.append('<span class="chip down">ขาลง</span>')
         if elapsed and elapsed < HISTORY_NEEDED_SEC and status != "HOLDING":
             chips.append(f'<span class="chip">รอข้อมูล {int(elapsed // 60)}/120 นาที</span>')
+        if change_15m:
+            chips.append(f'<span class="chip {"up" if change_15m >= 0 else "down"}">15 นาที {change_15m:+.2f}%</span>')
         if change_1h:
             chips.append(f'<span class="chip {"up" if change_1h >= 0 else "down"}">1 ชม. {change_1h:+.2f}%</span>')
         if change_2h is not None:
