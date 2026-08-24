@@ -8,6 +8,7 @@ InnovestX Automated Trading Bot — Price Action 2H Strategy
 3. แยก Firebase: ฐานหลัก = สถานะเทรด/ตั้งค่า, ฐานที่ 2 = bid/offer + ประวัติราคา
 4. ตัดสินใจซื้อเทียบ offer (ask), ขายเทียบ bid, กันสเปรดกว้าง
 5. แดชบอร์ดใช้สูตรเดียวกับบอท
+6. มีเหรียญแต่ยืนยันราคาจับคู่ไม่ได้ — ถือต่อทันทีด้วยต้นทุนประมาณ แล้วขาย/trailing ได้เลย ไม่รอปลดจากเว็บ
 
 ของเดิมยังอยู่ครบ: แดชบอร์ด, หยุด/เริ่มเทรด, รหัสผ่าน, % ขาดทุนต่อวัน, อัตราเงินต่อไม้,
 จำนวนไม้ขาดทุนติดกัน, price_history ต่อเหรียญ, ค่าธรรมเนียม, circuit breaker, Decimal, graceful shutdown
@@ -792,6 +793,7 @@ class InnovestXTradingBot:
             "consecutive_losses": 0,
             "pending_order": None,  # คำสั่งที่ timeout แล้วยังไม่รู้ว่าเข้าหรือไม่ — ห้ามยิงซ้ำ
             "halt_cleared_by_user": False,
+            "entry_price_estimated": False,  # True = ถือด้วยต้นทุนประมาณ เพราะยืนยัน fill ไม่ได้
         }
         try:
             saved = primary_ref(self.state_path).get()
@@ -866,15 +868,11 @@ class InnovestXTradingBot:
             self.state.update({"status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
             self.save_state()
         elif self.state["status"] == "IDLE" and coin_free > dust_threshold:
-            if self.state.get("halt_cleared_by_user"):
-                logger.warning(
-                    f"[{self.symbol}] มีเหรียญค้าง {coin_free} แต่ผู้ใช้ปลดล็อกแล้ว — "
-                    f"ไม่ HALTED ซ้ำ จะถือเป็น HOLDING ด้วยราคาตลาด"
-                )
-                self.resume_from_halt()
-            else:
-                logger.error(f"⚠️ RECONCILE MISMATCH: state บอก IDLE แต่มีเหรียญค้างอยู่ {coin_free} "
-                             f"(ไม่รู้ต้นทุนจริง) บอทจะไม่เทรดอัตโนมัติจนกว่าจะปลดล็อกจากหน้าเว็บ")
+            logger.warning(
+                f"[{self.symbol}] state บอก IDLE แต่มีเหรียญค้างอยู่ {coin_free} "
+                f"— ไม่ซื้อทับ จะถือต่อทันทีด้วยราคาประมาณ เพื่อให้ขายได้ (ไม่รอปลดจากเว็บ)"
+            )
+            if not self._adopt_unknown_buy_cost(coin_free):
                 self.state["status"] = "HALTED"
                 self.save_state()
         elif self.state["status"] == "HALTED" and coin_free <= dust_threshold:
@@ -1199,23 +1197,66 @@ class InnovestXTradingBot:
             "quantity": qty,
             "roundtrip_fee_percent": fee_pct,
             "pending_order": None,
+            "entry_price_estimated": False,
+            "halt_cleared_by_user": False,
         })
         self.save_state()
 
+    def _estimate_buy_cost(self, preferred=None):
+        """ต้นทุนสำรองเมื่อยืนยัน fill ไม่ได้ — ใช้ offer ตอนซื้อก่อน แล้วค่อยราคาตลาด"""
+        quote = self.state.get("quote") or {}
+        for candidate in (preferred, quote_mark_price(quote, "buy"), quote_mark_price(quote, "last")):
+            px = _safe_float(candidate, 0.0) or 0.0
+            if px > 0:
+                return px
+        return _safe_float(self.get_latest_price(), 0.0) or 0.0
+
     def _halt_unknown_buy_cost(self, qty):
-        """มีเหรียญเข้าพอร์ตแต่ไม่รู้ต้นทุน — ห้ามเดาราคา ห้ามซื้อซ้ำ"""
+        """สำรองสุดท้ายเมื่อมีเหรียญแต่ยังไม่มีราคาเลย — รอบถัดไปจะถือต่อเองเมื่อมีราคา"""
         self.state.update({
             "status": "HALTED",
             "entry_price": 0.0,
             "highest_price": 0.0,
             "quantity": qty,
             "pending_order": None,
+            "entry_price_estimated": False,
             "halt_cleared_by_user": False,
         })
         self.save_state()
 
+    def _adopt_unknown_buy_cost(self, qty, estimated_price=None):
+        """มีเหรียญในพอร์ตแต่ไม่รู้ fill จริง — ถือต่อทันทีด้วยราคาประมาณ ให้ trailing/ขายทำงาน ไม่รอปลดจากเว็บ"""
+        px = self._estimate_buy_cost(estimated_price)
+        if px <= 0:
+            logger.error(
+                f"[{self.symbol}] มีเหรียญเข้าพอร์ต {qty} แต่ยังไม่มีราคาตลาด "
+                f"— HALTED ชั่วคราว จะถือต่อเองในรอบถัดไปเมื่อมีราคา (ไม่ต้องปลดจากเว็บ)"
+            )
+            self._halt_unknown_buy_cost(qty)
+            return False
+        fee_pct = self.estimate_roundtrip_fee_percent()
+        latest = _safe_float(quote_mark_price(self.state.get("quote") or {}, "last"), 0.0) or 0.0
+        highest = max(px, latest, float(self.state.get("highest_price") or 0.0))
+        self.state.update({
+            "status": "HOLDING",
+            "entry_price": px,
+            "highest_price": highest,
+            "quantity": qty,
+            "roundtrip_fee_percent": fee_pct,
+            "pending_order": None,
+            "entry_price_estimated": True,
+            "halt_cleared_by_user": False,
+        })
+        self.save_state()
+        logger.warning(
+            f"[{self.symbol}] มีเหรียญ {qty} แต่ยืนยันราคาจับคู่ไม่ได้ "
+            f"— ถือต่อทันทีด้วยต้นทุนประมาณ {px} (สูงสุดที่เห็น {highest}) "
+            f"ไม่รอปลดจากเว็บ เพื่อไม่พลาดการขายตอนเหรียญวิ่ง"
+        )
+        return True
+
     def _finalize_buy(self, order_id=None, expected_buy=None, buy_value=None):
-        """จบขั้นตอนซื้อด้วยของจริงในพอร์ต — ไม่เดาราคา offer, ไม่เดาจำนวน"""
+        """จบขั้นตอนซื้อด้วยของจริงในพอร์ต — ไม่เดาจำนวน ถ้าไม่รู้ fill จะถือต่อด้วยราคาประมาณทันที"""
         dust = self._dust_threshold()
         avg_price = 0.0
         if order_id:
@@ -1237,12 +1278,11 @@ class InnovestXTradingBot:
                     + f", ค่าธรรมเนียม round-trip โดยประมาณ {fee_pct:.3f}%"
                 )
                 return True
-            logger.error(
+            logger.warning(
                 f"[{self.symbol}] มีเหรียญเข้าพอร์ต {qty} แต่ยืนยันราคาจับคู่ไม่ได้ "
-                f"— HALTED ไม่เดาราคา offer (ปลดจากหน้าเว็บได้)"
+                f"— จะถือต่อด้วยต้นทุนประมาณทันที ไม่รอปลดจากเว็บ"
             )
-            self._halt_unknown_buy_cost(qty)
-            return False
+            return self._adopt_unknown_buy_cost(qty, expected_buy)
 
         if still_pending:
             logger.warning(
@@ -1475,9 +1515,9 @@ class InnovestXTradingBot:
         if float(coin_free or 0) > dust:
             logger.error(
                 f"[{self.symbol}] state บอก IDLE แต่มีเหรียญในพอร์ต {coin_free} "
-                f"— ไม่ซื้อทับ ตั้ง HALTED จนกว่าจะรู้ต้นทุน"
+                f"— ไม่ซื้อทับ ถือต่อด้วยต้นทุนประมาณทันที เพื่อให้ขายได้"
             )
-            self._halt_unknown_buy_cost(coin_free)
+            self._adopt_unknown_buy_cost(coin_free, current_price)
             return False
         if thb_free <= self.MIN_ORDER_THB:
             logger.info(f"[{self.symbol}] เงินว่างไม่พอสำหรับซื้อขั้นต่ำ (คงเหลือ {thb_free:.2f} THB)")
@@ -1635,7 +1675,7 @@ class InnovestXTradingBot:
         self._register_trade_result(pnl_thb)
 
     def resume_from_halt(self):
-        """ปลด HALTED ระดับเหรียญจากหน้าเว็บ — ถ้ายังมีของค้าง ให้ถือเป็น HOLDING ด้วยราคาตลาด"""
+        """ปลด HALTED — ถ้ายังมีของค้าง ให้ถือเป็น HOLDING ด้วยราคาประมาณ แล้วขายได้ทันที"""
         _, coin_free, has_pending = self.get_free_balance()
         if has_pending:
             logger.warning(f"[{self.symbol}] ยังมีออเดอร์ค้าง — ยังไม่ปลด HALTED รอรอบถัดไป")
@@ -1643,26 +1683,11 @@ class InnovestXTradingBot:
         rules = self.get_symbol_rules()
         dust_threshold = float(rules["quantity_increment"])
         if coin_free > dust_threshold:
-            px = self.get_latest_price()
-            if not px:
-                logger.error(f"[{self.symbol}] ปลด HALTED ไม่ได้ชั่วคราว: ดึงราคาตลาดไม่ได้")
-                return False
-            logger.warning(
-                f"[{self.symbol}] ปลด HALTED ตามคำขอจากหน้าเว็บ: ยังมี {coin_free} เหรียญ "
-                f"— ตั้ง HOLDING ต้นทุนประมาณ {px} (ราคาตลาด ณ ตอนปลด) เพื่อให้บอทขายต่อได้"
-            )
-            self.state.update({
-                "status": "HOLDING",
-                "entry_price": px,
-                "highest_price": max(px, float(self.state.get("highest_price") or 0.0)),
-                "quantity": coin_free,
-                "halt_cleared_by_user": True,
-            })
-            self.save_state()
-            return True
-        logger.info(f"[{self.symbol}] ปลด HALTED ตามคำขอจากหน้าเว็บ: ไม่มีเหรียญค้าง — กลับ IDLE")
+            return self._adopt_unknown_buy_cost(coin_free)
+        logger.info(f"[{self.symbol}] ปลด HALTED: ไม่มีเหรียญค้าง — กลับ IDLE")
         self.state.update({
             "status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0,
+            "entry_price_estimated": False,
             "halt_cleared_by_user": True,
         })
         self.save_state()
@@ -1686,6 +1711,9 @@ class InnovestXTradingBot:
         if price is None:
             return
         self._record_price_tick(price)
+
+        if self.state.get("status") == "HALTED":
+            self.resume_from_halt()
 
         risk = load_shared_risk()
         if risk.get("status") == "HALTED" and self.state.get("status") != "HOLDING":
@@ -2199,8 +2227,8 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         names = ", ".join(_display_symbol(s) for s in halted_coins)
         banners.append(
             f'<div class="banner banner-danger">เหรียญค้างโดยไม่รู้ต้นทุน: {names} '
-            f"— กดปลดล็อกด้านล่าง เพื่อให้บอทถือต่อด้วยราคาตลาดแล้วขายได้ "
-            f"(ของเดิมปลดจากเว็บไม่ได้)</div>"
+            f"— บอทจะถือต่อเองเมื่อมีราคาตลาด แล้วขาย/trailing ได้เลย ไม่ต้องเฝ้าหน้าเว็บ "
+            f"ถ้าค้างนานผิดปกติค่อยกดปลดล็อกด้านล่าง</div>"
         )
 
     if control.get("paused"):
@@ -2291,12 +2319,14 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             chips.append('<span class="chip down">รอขายก่อนเอาออก</span>')
         if status == "HOLDING":
             chips.append('<span class="chip hold">ถืออยู่</span>')
+            if st.get("entry_price_estimated"):
+                chips.append('<span class="chip">ต้นทุนประมาณ</span>')
             entry = float(st.get("entry_price", 0.0) or 0.0)
             if current is not None and entry:
                 d = (current - entry) / entry * 100
                 chips.append(f'<span class="chip {"up" if d >= 0 else "down"}">{d:+.2f}% จากต้นทุน</span>')
         elif status == "HALTED":
-            chips.append('<span class="chip down">HALTED — ของค้างไม่รู้ต้นทุน</span>')
+            chips.append('<span class="chip down">HALTED — รอราคาตลาด บอทจะถือต่อเอง</span>')
         else:
             chips.append('<span class="chip" >เฝ้าอยู่</span>')
         if trend.get("should_buy") and status != "HOLDING":
@@ -2324,9 +2354,13 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
                 f'<span class="chip {"down" if spread > MAX_SPREAD_PERCENT else ""}">สเปรด {spread:.2f}%</span>'
             )
         if status == "HOLDING":
-            sub = f"ต้นทุน {_fmt_thb(float(st.get('entry_price', 0) or 0))} ฿ · ดูแลด้วย trailing / stop loss แบบเดิม"
+            entry_txt = _fmt_thb(float(st.get("entry_price", 0) or 0))
+            if st.get("entry_price_estimated"):
+                sub = f"ต้นทุนประมาณ {entry_txt} ฿ (ยืนยันจับคู่ไม่ได้) · ดูแลด้วย trailing / stop loss แบบเดิม"
+            else:
+                sub = f"ต้นทุน {entry_txt} ฿ · ดูแลด้วย trailing / stop loss แบบเดิม"
         elif status == "HALTED":
-            sub = "ของค้างไม่รู้ต้นทุน — กดปลดล็อกด้านล่าง เพื่อให้บอทถือต่อด้วยราคาตลาดแล้วขายได้"
+            sub = "ยังดึงราคาไม่ได้ — บอทจะถือต่อเองเมื่อมีราคาตลาด แล้วขายได้ ไม่ต้องรอปลดจากเว็บ"
         elif elapsed and elapsed < 7200:
             sub = "รอข้อมูลครบ 2 ชั่วโมงก่อนเริ่มประเมินเข้าซื้อ"
         else:
@@ -2394,7 +2428,7 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         else:
             names = ", ".join(_display_symbol(s) for s in halted_coins)
             unlock_label = "มีเหรียญค้างโดยไม่รู้ต้นทุน (HALTED)"
-            unlock_sub = f"{names} — กดปลดล็อกเพื่อให้บอทถือต่อด้วยราคาตลาดปัจจุบัน แล้วขายได้"
+            unlock_sub = f"{names} — ปกติบอทถือต่อเองเมื่อมีราคา ถ้าค้างอยู่ให้กดเพื่อถือต่อด้วยราคาตลาดแล้วขายได้"
         unlock_button_html = f'''<form class="control-card halted" method="POST" action="/control/unlock">
       <div class="control-label">{unlock_label}</div>
         <div class="control-sub">{unlock_sub}</div>
@@ -2797,7 +2831,11 @@ if __name__ == "__main__":
             for bot in bots.values():
                 try:
                     px = bot.poll_price()
-                    if px is not None and bot.state.get("status") == "HOLDING":
+                    if px is None:
+                        continue
+                    if bot.state.get("status") == "HALTED":
+                        bot.resume_from_halt()
+                    if bot.state.get("status") == "HOLDING":
                         bot.run_strategy(px)
                 except Exception:
                     logger.exception(f"[{bot.symbol}] ดึงราคา/ดูแลโพซิชันตอนหยุดชั่วคราวล้มเหลว")
@@ -2814,6 +2852,11 @@ if __name__ == "__main__":
                 px = prices.get(bot.symbol)
                 if px is None:
                     continue
+                if bot.state.get("status") == "HALTED":
+                    try:
+                        bot.resume_from_halt()
+                    except Exception:
+                        logger.exception(f"[{bot.symbol}] ปลด HALTED อัตโนมัติล้มเหลว")
                 if bot.state.get("status") == "HOLDING":
                     try:
                         bot.run_strategy(px)

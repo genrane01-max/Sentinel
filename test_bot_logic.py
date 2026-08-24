@@ -360,8 +360,10 @@ class BuyPathTests(unittest.TestCase):
         with patch("bot.time.sleep", return_value=None):
             ok = b.try_enter_position(100.0)
         self.assertFalse(ok)
-        self.assertEqual(b.state["status"], "HALTED")
-        self.assertEqual(b.state["entry_price"], 0.0)
+        self.assertEqual(b.state["status"], "HOLDING")
+        self.assertGreater(b.state["entry_price"], 0.0)
+        self.assertTrue(b.state["entry_price_estimated"])
+        self.assertGreater(b.state["quantity"], 0)
 
     def test_uses_actual_wallet_qty_not_estimate(self):
         b = self._bot("ETHTHB")
@@ -383,7 +385,7 @@ class BuyPathTests(unittest.TestCase):
         self.assertAlmostEqual(b.state["entry_price"], 101.5)
         self.assertAlmostEqual(b.state["quantity"], 0.01234)
 
-    def test_unknown_fill_price_with_coins_halts_instead_of_guessing_offer(self):
+    def test_unknown_fill_price_adopts_estimated_cost_instead_of_waiting(self):
         b = self._bot("SOLTHB")
         calls = {"n": 0}
 
@@ -398,10 +400,51 @@ class BuyPathTests(unittest.TestCase):
         b.confirm_fill_price = lambda *a, **k: 0.0
         with patch("bot.time.sleep", return_value=None):
             ok = b.try_enter_position(100.0)
+        self.assertTrue(ok)
+        self.assertEqual(b.state["status"], "HOLDING")
+        self.assertAlmostEqual(b.state["entry_price"], 100.0)
+        self.assertTrue(b.state["entry_price_estimated"])
+        self.assertGreater(b.state["quantity"], 0)
+
+    def test_unknown_fill_tracks_high_if_coin_already_ran(self):
+        b = self._bot("SOLTHB")
+        b.state["quote"] = {"bid": 118.0, "ask": 100.0, "last": 120.0, "spread_pct": 0.1}
+        calls = {"n": 0}
+
+        def fake_balance():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return (5000.0, 0.0, False)
+            return (4000.0, 0.02, False)
+
+        b.get_free_balance = fake_balance
+        b.execute_market_order = lambda **kw: {"code": "0000", "data": {"orderId": "oid-3"}}
+        b.confirm_fill_price = lambda *a, **k: 0.0
+        with patch("bot.time.sleep", return_value=None):
+            ok = b.try_enter_position(100.0)
+        self.assertTrue(ok)
+        self.assertEqual(b.state["status"], "HOLDING")
+        self.assertAlmostEqual(b.state["entry_price"], 100.0)
+        self.assertAlmostEqual(b.state["highest_price"], 120.0)
+
+    def test_unknown_cost_without_price_stays_halted_then_auto_resumes(self):
+        b = self._bot("ADAUSDT")
+        b.state["quote"] = {}
+        b.get_latest_price = lambda: None
+        b.get_free_balance = lambda: (5000.0, 0.01, False)
+        b.execute_market_order = lambda **kw: (_ for _ in ()).throw(AssertionError("must not buy"))
+        with patch("bot.time.sleep", return_value=None):
+            ok = b.try_enter_position(0.0)
         self.assertFalse(ok)
         self.assertEqual(b.state["status"], "HALTED")
         self.assertEqual(b.state["entry_price"], 0.0)
-        self.assertGreater(b.state["quantity"], 0)
+
+        b.state["quote"] = {"bid": 104.0, "ask": 106.0, "last": 105.0, "spread_pct": 0.1}
+        b.get_latest_price = lambda: 105.0
+        self.assertTrue(b.resume_from_halt())
+        self.assertEqual(b.state["status"], "HOLDING")
+        self.assertAlmostEqual(b.state["entry_price"], 106.0)
+        self.assertTrue(b.state["entry_price_estimated"])
 
     def test_timeout_then_coins_arrive_does_not_resend(self):
         b = self._bot("XRPTHB")
@@ -429,9 +472,10 @@ class BuyPathTests(unittest.TestCase):
         b.confirm_fill_price = lambda *a, **k: 0.0
         with patch("bot.time.sleep", return_value=None):
             ok = b.try_enter_position(100.0)
-        self.assertFalse(ok)
+        self.assertTrue(ok)
         self.assertEqual(sent["n"], 1)
-        self.assertEqual(b.state["status"], "HALTED")
+        self.assertEqual(b.state["status"], "HOLDING")
+        self.assertTrue(b.state["entry_price_estimated"])
         with patch("bot.time.sleep", return_value=None):
             ok2 = b.try_enter_position(100.0)
         self.assertFalse(ok2)
