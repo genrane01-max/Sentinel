@@ -1,2 +1,2 @@
-requests
-firebase-admin
+requests==2.34.2
+firebase-admin==7.5.0

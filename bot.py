@@ -124,20 +124,27 @@ init_firebase()
 DEFAULT_SYMBOL = os.environ.get("SYMBOL", "BTCTHB").upper()
 RUNNING_SYMBOL = {"value": DEFAULT_SYMBOL}
 RUNNING_WATCHLIST = {"value": [DEFAULT_SYMBOL]}
+LIVE_BOTS = {}
 STOP_ALL = {"value": False}
 SHARED_RISK_PATH = "bots/_shared/risk"
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}$")
+KNOWN_QUOTE_SUFFIXES = ("THB", "USDT", "USD")
 # เข้าซื้อด้วย 2 ชม.เป็นหลัก — ชม.3 ใช้แค่ห้ามซื้อ ไม่เอามายืนยัน
 MIN_CHANGE_1H_PERCENT = 0.5      # ชม.ล่าสุดต้องขึ้นอย่างน้อยเท่านี้ (สูงกว่าค่าฟี ~0.4%)
 MIN_NET_2H_PERCENT = 0.7         # สุทธิ 2 ชม. ต้องบวกจริง
 MAX_CHANGE_1H_PERCENT = 2.5      # ชม.ล่าสุดพุ่งเกินนี้ = ไล่หัว ไม่ซื้อ
 HOUR3_VETO_PERCENT = -1.5        # ชม.3 ลงแรงกว่านี้ = ขาลงใหญ่ยังไม่จบ ห้ามซื้อ
-# หมายเหตุ: ค่านี้เป็น "ป้ายกำกับ" มากกว่า threshold ที่ปรับได้จริง — evaluate_entry_signal()
-# บวกคะแนนแบบสะสมทีละขั้น (50+30+20) แล้ว return ทันทีถ้าขั้นไหนไม่ผ่าน ดังนั้นจุดที่โค้ด
-# จะเทียบ confidence >= MIN_CONFIDENCE_TO_BUY มีค่าที่เป็นไปได้แค่ 100 เท่านั้น (ไม่เคยเป็น 80-99)
-# การจะเปลี่ยนพฤติกรรมซื้อจริงๆ ต้องไปแก้เงื่อนไขแต่ละขั้นตรงๆ ไม่ใช่แก้ตัวเลขนี้
+# คะแนนสะสม: ชม.1 ผ่าน +50, ชม.2 ขึ้น +30, สุทธิ 2 ชม.ผ่าน +20, ชม.2 ลงหักเหลือ ~10
+# ซื้อเมื่อ confidence >= MIN_CONFIDENCE_TO_BUY และไม่โดน veto (ไล่หัว / ชม.3 ลงแรง)
 MIN_CONFIDENCE_TO_BUY = 80
 MAX_SPREAD_PERCENT = 0.5         # ไม่ซื้อถ้า (ask-bid)/mid กว้างเกินนี้ (%)
+ORDER_SEND_PATH = "/api/v1/digital-asset/order/send"
+PENDING_ORDER_TTL_SEC = 120
+MARKET_HISTORY_FLUSH_SEC = 120
+PRICE_TICK_MIN_INTERVAL_SEC = 60
+PRICE_TICK_MIN_MOVE_PERCENT = 0.05
+_SYMBOL_CATALOG = {"ts": 0.0, "symbols": None}
+_SHUTDOWN_HANDLERS_INSTALLED = False
 
 
 def _pct_change(newer, older):
@@ -227,7 +234,8 @@ def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ag
     """ตัดสินใจซื้อด้วย 2 ชม.เป็นหลัก ชม.3 ใช้แค่ห้ามซื้อถ้าลงแรง
 
     คะแนน: ชม.1 ขึ้นพอ +50, ชม.2 ขึ้น +30, สุทธิ 2 ชม.พอ +20
-    ชม.2 ลง / ชม.1 อ่อน / สุทธิไม่พอ / ไล่หัว / ชม.3 ลงแรง → ไม่ซื้อ (ไม่บวกคะแนนจากชม.3)
+    ชม.2 ลงหักเหลือ ~10 / ชม.1 อ่อน = 0 / ไล่หัว / ชม.3 ลงแรง → ไม่ซื้อ
+    ซื้อเมื่อ confidence >= MIN_CONFIDENCE_TO_BUY และไม่โดน veto
     """
     result = {
         "direction": None,
@@ -268,10 +276,12 @@ def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ag
         return result
 
     confidence = 0
-    if change_1h < MIN_CHANGE_1H_PERCENT:
-        result["reason"] = "weak_1h"
-        return result
-    confidence += 50
+    reason = None
+
+    if change_1h >= MIN_CHANGE_1H_PERCENT:
+        confidence += 50
+    else:
+        reason = "weak_1h"
 
     if change_1h > MAX_CHANGE_1H_PERCENT:
         result["confidence"] = confidence
@@ -279,19 +289,19 @@ def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ag
         return result
 
     if change_2h is None:
+        result["confidence"] = confidence
         result["reason"] = "gap"
         return result
     if change_2h <= 0:
-        result["confidence"] = max(0, confidence - 40)
-        result["reason"] = "hour2_down"
-        return result
-    confidence += 30
+        confidence = max(0, confidence - 40)
+        reason = "hour2_down"
+    else:
+        confidence += 30
 
-    if net_2h is None or net_2h < MIN_NET_2H_PERCENT:
-        result["confidence"] = confidence
-        result["reason"] = "weak_net"
-        return result
-    confidence += 20
+    if net_2h is not None and net_2h >= MIN_NET_2H_PERCENT:
+        confidence += 20
+    elif reason is None:
+        reason = "weak_net"
 
     if change_3h is not None and change_3h < HOUR3_VETO_PERCENT:
         result["confidence"] = confidence
@@ -301,8 +311,208 @@ def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ag
 
     result["confidence"] = confidence
     result["should_buy"] = confidence >= MIN_CONFIDENCE_TO_BUY
-    result["reason"] = None if result["should_buy"] else "weak"
+    result["reason"] = None if result["should_buy"] else (reason or "weak")
     return result
+
+
+def net_pnl_thb(entry_price, sell_price, qty, roundtrip_fee_percent):
+    """กำไร/ขาดทุนสุทธิหลังหักค่าธรรมเนียมไป-กลับ (ซื้อขาหนึ่ง + ขายขาหนึ่ง)"""
+    entry_price = float(entry_price or 0.0)
+    sell_price = float(sell_price or 0.0)
+    qty = float(qty or 0.0)
+    fee_pct = float(roundtrip_fee_percent or 0.0)
+    if entry_price <= 0 or sell_price <= 0 or qty <= 0:
+        return 0.0
+    one_way = (fee_pct / 2.0) / 100.0
+    buy_cost = entry_price * qty * (1.0 + one_way)
+    sell_proceeds = sell_price * qty * (1.0 - one_way)
+    return sell_proceeds - buy_cost
+
+
+def is_mutating_order_path(path):
+    p = (path or "").split("?")[0].rstrip("/")
+    return p.endswith("/order/send") or p.endswith("/order/cancel")
+
+
+def looks_like_pair(symbol):
+    """คู่เหรียญต้องเป็นตัวอักษร/ตัวเลข และลงท้ายด้วยสกุลเงินอ้างอิง เช่น BTCTHB"""
+    sym = _normalize_symbol(symbol)
+    if not SYMBOL_RE.match(sym):
+        return False
+    return any(sym.endswith(q) and len(sym) > len(q) for q in KNOWN_QUOTE_SUFFIXES)
+
+
+def should_append_price_tick(history, now, price, min_interval=PRICE_TICK_MIN_INTERVAL_SEC,
+                             min_move_pct=PRICE_TICK_MIN_MOVE_PERCENT):
+    """ไม่บันทึกทุก 15 วิถ้ายังไม่ครบช่วง และราคาขยับน้อย — ลด payload ที่เขียนขึ้น Firebase"""
+    if not history:
+        return True
+    try:
+        last_ts, last_px = history[-1][0], history[-1][1]
+    except (TypeError, ValueError, IndexError):
+        return True
+    if now - float(last_ts or 0) >= min_interval:
+        return True
+    last_px = float(last_px or 0)
+    if last_px > 0 and abs(float(price) - last_px) / last_px * 100.0 >= min_move_pct:
+        return True
+    return False
+
+
+def signed_request(api_key, api_secret, method, path, query="", body=None,
+                   timeout_sec=10, max_retries=3, allow_retry=True,
+                   host="api.innovestxonline.com", _retry_count=0):
+    """ส่ง request พร้อม HMAC-SHA256 — คำสั่งซื้อ/ขายห้าม retry ตอน timeout"""
+    url = f"https://{host}" + path + query
+    body_str = json.dumps(body) if body else ""
+    timestamp = str(int(time.time() * 1000))
+    request_uid = str(uuid.uuid4())
+    content_type = "application/json"
+
+    content_to_sign = (
+        api_key + method.upper() + host + path + query +
+        content_type + request_uid + timestamp + body_str
+    )
+    signature = hmac.new(
+        api_secret.encode("utf-8"),
+        content_to_sign.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    headers = {
+        "Content-Type": content_type,
+        "X-INVX-REQUEST-UID": request_uid,
+        "X-INVX-TIMESTAMP": timestamp,
+        "X-INVX-SIGNATURE": signature,
+        "X-INVX-APIKEY": api_key,
+    }
+
+    mutating = is_mutating_order_path(path)
+    can_retry = allow_retry and not mutating
+
+    try:
+        if method.upper() == "GET":
+            response = requests.get(url, headers=headers, timeout=timeout_sec)
+        elif method.upper() == "POST":
+            response = requests.post(url, headers=headers, data=body_str, timeout=timeout_sec)
+        else:
+            raise ValueError(f"Method {method} ไม่รองรับ")
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+        if mutating:
+            logger.error(
+                f"[UID {request_uid}] timeout/ขาดการเชื่อมตอนส่งคำสั่งซื้อขาย — ไม่ยิงซ้ำ "
+                f"(ออเดอร์อาจเข้าไปแล้ว) path={path} err={e}"
+            )
+            return {"code": "TIMEOUT_INDETERMINATE", "message": str(e), "path": path, "uid": request_uid}
+        logger.warning(f"[UID {request_uid}] เชื่อมต่อไม่สำเร็จ ({e}) — retry {_retry_count + 1}/{max_retries}")
+        if can_retry and _retry_count < max_retries:
+            time.sleep(2 ** _retry_count)
+            return signed_request(
+                api_key, api_secret, method, path, query, body,
+                timeout_sec, max_retries, allow_retry, host, _retry_count + 1,
+            )
+        logger.error(f"[UID {request_uid}] ยกเลิกหลัง retry ครบจำนวน: {e}")
+        return None
+
+    if response.status_code == 429 or response.status_code >= 500:
+        retry_this = can_retry or (response.status_code == 429 and not mutating)
+        logger.warning(f"[UID {request_uid}] HTTP {response.status_code} — retry {_retry_count + 1}/{max_retries}")
+        if mutating and response.status_code >= 500:
+            logger.error(
+                f"[UID {request_uid}] HTTP {response.status_code} ตอนส่งคำสั่งซื้อขาย — ไม่ยิงซ้ำ "
+                f"(ออเดอร์อาจเข้าไปแล้ว)"
+            )
+            return {"code": "TIMEOUT_INDETERMINATE", "message": f"HTTP {response.status_code}", "path": path, "uid": request_uid}
+        if retry_this and _retry_count < max_retries:
+            time.sleep(2 ** _retry_count)
+            return signed_request(
+                api_key, api_secret, method, path, query, body,
+                timeout_sec, max_retries, allow_retry, host, _retry_count + 1,
+            )
+        logger.error(f"[UID {request_uid}] HTTP {response.status_code} หลัง retry ครบจำนวน")
+        return None
+
+    try:
+        data = response.json()
+    except ValueError:
+        logger.error(f"[UID {request_uid}] HTTP {response.status_code} — response ไม่ใช่ JSON: {response.text[:300]}")
+        return None
+
+    code = data.get("code")
+    logger.info(f"[UID {request_uid}] {method} {path} -> code={code}")
+
+    if code == "4005":
+        logger.error(f"[UID {request_uid}] 4005 Invalid Signature — ตรวจสอบลำดับ string-to-sign และ API Secret")
+    elif code == "4011":
+        logger.error(f"[UID {request_uid}] 4011 Timestamp mismatch — นาฬิกาเครื่องอาจคลาดจาก UTC เกิน 150 วิ "
+                     f"กรุณาซิงค์เวลาเครื่อง (NTP) ก่อนรันต่อ")
+    elif code == "4019":
+        logger.warning(f"[UID {request_uid}] 4019 Insufficient Balance")
+    elif code == "4042":
+        logger.warning(f"[UID {request_uid}] 4042 Symbol not found — ตรวจสอบ symbol")
+
+    return data
+
+
+def fetch_exchange_symbol_catalog(force=False):
+    """รายการคู่เหรียญบน InnovestX — cache 10 นาที"""
+    now = time.time()
+    cached = _SYMBOL_CATALOG.get("symbols")
+    if not force and cached is not None and (now - float(_SYMBOL_CATALOG.get("ts") or 0)) < 600:
+        return cached
+    api_key = os.environ.get("INVX_API_KEY")
+    api_secret = os.environ.get("INVX_API_SECRET")
+    bot = next(iter(LIVE_BOTS.values()), None)
+    res = None
+    if bot is not None:
+        res = bot.send_request("GET", "/api/v1/digital-asset/symbols")
+    elif api_key and api_secret:
+        res = signed_request(api_key, api_secret, "GET", "/api/v1/digital-asset/symbols")
+    if not res or res.get("code") != "0000":
+        return cached
+    symbols = {
+        str(row.get("symbol") or "").upper()
+        for row in (res.get("data") or [])
+        if row.get("symbol")
+    }
+    _SYMBOL_CATALOG["symbols"] = symbols
+    _SYMBOL_CATALOG["ts"] = now
+    return symbols
+
+
+def validate_watchlist_symbol(raw, catalog=None):
+    """ตรวจทั้งรูปแบบคู่เหรียญ และว่ามีบนตลาดจริง (ถ้าดึงรายการได้)"""
+    sym = _normalize_symbol(raw)
+    if not looks_like_pair(sym):
+        return None, f"รูปแบบไม่ถูกต้อง ต้องเป็นคู่เหรียญเช่น BTCTHB/ETHTHB ไม่ใช่ '{raw}'"
+    if catalog is None:
+        catalog = fetch_exchange_symbol_catalog()
+    if catalog is not None and sym not in catalog:
+        return None, f"ไม่พบคู่ {sym} บน InnovestX"
+    return sym, None
+
+
+def _handle_process_shutdown(signum, frame):
+    logger.info(f"ได้รับสัญญาณหยุด ({signum}) กำลังบันทึกสถานะทุกเหรียญก่อนปิดบอท...")
+    STOP_ALL["value"] = True
+    for bot in list(LIVE_BOTS.values()):
+        bot._stop_requested = True
+        try:
+            bot.save_state()
+            bot.save_market(force_history=True)
+        except Exception:
+            logger.exception(f"[{getattr(bot, 'symbol', '?')}] บันทึกตอนปิดไม่สำเร็จ")
+
+
+def install_shutdown_handlers():
+    """ลงทะเบียน SIGINT/SIGTERM ครั้งเดียวต่อโปรเซส — ห้ามให้แต่ละเหรียญทับของเดิม"""
+    global _SHUTDOWN_HANDLERS_INSTALLED
+    if _SHUTDOWN_HANDLERS_INSTALLED:
+        return
+    signal.signal(signal.SIGINT, _handle_process_shutdown)
+    signal.signal(signal.SIGTERM, _handle_process_shutdown)
+    _SHUTDOWN_HANDLERS_INSTALLED = True
+    logger.info("ลงทะเบียน SIGINT/SIGTERM ระดับโปรเซสแล้ว")
 
 
 REASON_TH = {
@@ -341,13 +551,13 @@ def _normalize_watchlist(raw, fallback_symbol):
         source = []
     for item in source:
         sym = _normalize_symbol(item)
-        if SYMBOL_RE.match(sym) and sym not in symbols:
+        if looks_like_pair(sym) and sym not in symbols:
             symbols.append(sym)
     if symbols:
         return symbols
     if raw is None:
         fallback = _normalize_symbol(fallback_symbol) or DEFAULT_SYMBOL
-        if SYMBOL_RE.match(fallback):
+        if looks_like_pair(fallback):
             return [fallback]
         return [DEFAULT_SYMBOL]
     return []
@@ -506,12 +716,13 @@ class InnovestXTradingBot:
         self.trade_size_percent = self.DEFAULT_TRADE_SIZE_PERCENT
 
         self._stop_requested = False
-        signal.signal(signal.SIGINT, self._handle_shutdown)
-        signal.signal(signal.SIGTERM, self._handle_shutdown)
+        self._last_history_flush_ts = 0.0
+        install_shutdown_handlers()
 
         self._last_reconcile_ts = 0.0  # บังคับให้ reconcile รอบแรกใน loop ทำงานตามปกติ (ไม่ต้องรอครบ RECONCILE_INTERVAL_SEC)
 
         self.state = self.load_state()
+        LIVE_BOTS[self.symbol] = self
 
     # ==================== State management ====================
     def load_state(self):
@@ -527,6 +738,8 @@ class InnovestXTradingBot:
             "daily_start_balance": 0.0,
             "daily_realized_pnl": 0.0,
             "consecutive_losses": 0,
+            "pending_order": None,  # คำสั่งที่ timeout แล้วยังไม่รู้ว่าเข้าหรือไม่ — ห้ามยิงซ้ำ
+            "halt_cleared_by_user": False,
         }
         try:
             saved = primary_ref(self.state_path).get()
@@ -566,21 +779,20 @@ class InnovestXTradingBot:
         except Exception as e:
             logger.error(f"บันทึกสถานะไป Firebase ไม่สำเร็จ: {e}")
 
-    def save_market(self):
+    def save_market(self, force_history=True):
+        """บันทึก quote บ่อยได้ แต่ประวัติราคาทั้งก้อนไม่เขียนทุก 15 วิ"""
         try:
-            market_ref(self.market_path).set({
-                "quote": self.state.get("quote") or {},
-                "price_history": self.state.get("price_history") or [],
-            })
+            payload = {"quote": self.state.get("quote") or {}}
+            now = time.time()
+            if force_history or (now - float(getattr(self, "_last_history_flush_ts", 0) or 0)) >= MARKET_HISTORY_FLUSH_SEC:
+                payload["price_history"] = self.state.get("price_history") or []
+                self._last_history_flush_ts = now
+            market_ref(self.market_path).update(payload)
         except Exception as e:
             logger.error(f"บันทึก bid/offer ไปฐานตลาดไม่สำเร็จ: {e}")
 
     def _handle_shutdown(self, signum, frame):
-        logger.info(f"ได้รับสัญญาณหยุด ({signum}) กำลังบันทึกสถานะก่อนปิดบอท...")
-        self._stop_requested = True
-        STOP_ALL["value"] = True
-        self.save_state()
-        self.save_market()
+        _handle_process_shutdown(signum, frame)
 
     def reconcile_state_on_startup(self):
         """เช็คว่า state ตรงกับยอดจริงในพอร์ตหรือไม่ — เรียกตอน start และเรียกซ้ำเป็นระยะระหว่างบอทรันผ่าน maybe_reconcile_periodically()"""
@@ -602,13 +814,23 @@ class InnovestXTradingBot:
             self.state.update({"status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
             self.save_state()
         elif self.state["status"] == "IDLE" and coin_free > dust_threshold:
-            logger.error(f"⚠️ RECONCILE MISMATCH: state บอก IDLE แต่มีเหรียญค้างอยู่ {coin_free} "
-                         f"(ไม่รู้ต้นทุนจริง) บอทจะไม่เทรดอัตโนมัติจนกว่าจะตรวจสอบด้วยมือ")
-            self.state["status"] = "HALTED"
-            self.save_state()
+            if self.state.get("halt_cleared_by_user"):
+                logger.warning(
+                    f"[{self.symbol}] มีเหรียญค้าง {coin_free} แต่ผู้ใช้ปลดล็อกแล้ว — "
+                    f"ไม่ HALTED ซ้ำ จะถือเป็น HOLDING ด้วยราคาตลาด"
+                )
+                self.resume_from_halt()
+            else:
+                logger.error(f"⚠️ RECONCILE MISMATCH: state บอก IDLE แต่มีเหรียญค้างอยู่ {coin_free} "
+                             f"(ไม่รู้ต้นทุนจริง) บอทจะไม่เทรดอัตโนมัติจนกว่าจะปลดล็อกจากหน้าเว็บ")
+                self.state["status"] = "HALTED"
+                self.save_state()
         elif self.state["status"] == "HALTED" and coin_free <= dust_threshold:
             logger.info(f"[{self.symbol}] HALTED แต่เหรียญในพอร์ตหมดแล้ว — ปลดเป็น IDLE ให้เฝ้าต่อได้")
-            self.state.update({"status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
+            self.state.update({
+                "status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0,
+                "halt_cleared_by_user": False,
+            })
             self.save_state()
         else:
             logger.info(f"Reconcile ผ่าน: state={self.state['status']} ตรงกับพอร์ตจริง "
@@ -625,74 +847,15 @@ class InnovestXTradingBot:
 
     # ==================== HTTP / signing ====================
     def send_request(self, method, path, query="", body=None, _retry_count=0):
-        """ส่ง request พร้อม HMAC-SHA256 signature, timeout, retry/backoff และ audit log ต่อ request-uid"""
-        url = self.base_url + path + query
-        body_str = json.dumps(body) if body else ""
-        timestamp = str(int(time.time() * 1000))
-        request_uid = str(uuid.uuid4())
-        content_type = "application/json"
-
-        content_to_sign = (
-            self.api_key + method.upper() + self.host + path + query +
-            content_type + request_uid + timestamp + body_str
+        """ส่ง request พร้อม HMAC-SHA256 — คำสั่งซื้อ/ขายไม่ retry ตอน timeout"""
+        return signed_request(
+            self.api_key, self.api_secret, method, path, query, body,
+            timeout_sec=self.REQUEST_TIMEOUT_SEC,
+            max_retries=self.MAX_RETRIES,
+            allow_retry=not is_mutating_order_path(path),
+            host=self.host,
+            _retry_count=_retry_count,
         )
-        signature = hmac.new(
-            self.api_secret.encode("utf-8"),
-            content_to_sign.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-
-        headers = {
-            "Content-Type": content_type,
-            "X-INVX-REQUEST-UID": request_uid,
-            "X-INVX-TIMESTAMP": timestamp,
-            "X-INVX-SIGNATURE": signature,
-            "X-INVX-APIKEY": self.api_key,
-        }
-
-        try:
-            if method.upper() == "GET":
-                response = requests.get(url, headers=headers, timeout=self.REQUEST_TIMEOUT_SEC)
-            elif method.upper() == "POST":
-                response = requests.post(url, headers=headers, data=body_str, timeout=self.REQUEST_TIMEOUT_SEC)
-            else:
-                raise ValueError(f"Method {method} ไม่รองรับ")
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-            logger.warning(f"[UID {request_uid}] เชื่อมต่อไม่สำเร็จ ({e}) — retry {_retry_count + 1}/{self.MAX_RETRIES}")
-            if _retry_count < self.MAX_RETRIES:
-                time.sleep(2 ** _retry_count)
-                return self.send_request(method, path, query, body, _retry_count + 1)
-            logger.error(f"[UID {request_uid}] ยกเลิกหลัง retry ครบจำนวน: {e}")
-            return None
-
-        if response.status_code == 429 or response.status_code >= 500:
-            logger.warning(f"[UID {request_uid}] HTTP {response.status_code} — retry {_retry_count + 1}/{self.MAX_RETRIES}")
-            if _retry_count < self.MAX_RETRIES:
-                time.sleep(2 ** _retry_count)
-                return self.send_request(method, path, query, body, _retry_count + 1)
-            logger.error(f"[UID {request_uid}] HTTP {response.status_code} หลัง retry ครบจำนวน")
-            return None
-
-        try:
-            data = response.json()
-        except ValueError:
-            logger.error(f"[UID {request_uid}] HTTP {response.status_code} — response ไม่ใช่ JSON: {response.text[:300]}")
-            return None
-
-        code = data.get("code")
-        logger.info(f"[UID {request_uid}] {method} {path} -> code={code}")
-
-        if code == "4005":
-            logger.error(f"[UID {request_uid}] 4005 Invalid Signature — ตรวจสอบลำดับ string-to-sign และ API Secret")
-        elif code == "4011":
-            logger.error(f"[UID {request_uid}] 4011 Timestamp mismatch — นาฬิกาเครื่องอาจคลาดจาก UTC เกิน 150 วิ "
-                         f"กรุณาซิงค์เวลาเครื่อง (NTP) ก่อนรันต่อ")
-        elif code == "4019":
-            logger.warning(f"[UID {request_uid}] 4019 Insufficient Balance")
-        elif code == "4042":
-            logger.warning(f"[UID {request_uid}] 4042 Symbol not found — ตรวจสอบ symbol '{self.symbol}'")
-
-        return data
 
     # ==================== Market data / price history ====================
     def get_latest_quote(self):
@@ -728,10 +891,15 @@ class InnovestXTradingBot:
 
     def _record_price_tick(self, price):
         now = time.time()
-        self.state["price_history"].append([now, price])
-        cutoff = now - 10800  # เก็บย้อนหลังแค่ 3 ชั่วโมงพอสำหรับกลยุทธ์
-        self.state["price_history"] = [t for t in self.state["price_history"] if t[0] >= cutoff]
-        self.save_market()
+        hist = self.state.get("price_history") or []
+        if should_append_price_tick(hist, now, price):
+            hist.append([now, price])
+            cutoff = now - 10800  # เก็บย้อนหลังแค่ 3 ชั่วโมงพอสำหรับกลยุทธ์
+            self.state["price_history"] = [t for t in hist if t[0] >= cutoff]
+            self.save_market(force_history=False)
+        else:
+            # ราคาไม่ขยับพอ — อัปเดตแค่ quote ไม่เขียนประวัติทั้งก้อน
+            self.save_market(force_history=False)
 
     def _price_at_offset(self, seconds_ago, tolerance_sec=300):
         history = self.state["price_history"]
@@ -860,12 +1028,80 @@ class InnovestXTradingBot:
         return thb_free, coin_free, has_pending_orders
 
     # ==================== Orders ====================
+    def _has_unresolved_order(self):
+        pending = self.state.get("pending_order") or {}
+        if not pending:
+            return False
+        age = time.time() - float(pending.get("ts") or 0)
+        if age > PENDING_ORDER_TTL_SEC:
+            logger.warning(
+                f"[{self.symbol}] pending_order อายุ {age:.0f} วิ เกิน {PENDING_ORDER_TTL_SEC} วิ "
+                f"— ถือว่าออเดอร์ไม่เข้า อนุญาตยิงใหม่"
+            )
+            self.state["pending_order"] = None
+            self.save_state()
+            return False
+        return True
+
+    def _recover_order_after_timeout(self, side, max_attempts=5, delay_sec=1.5):
+        """หลัง timeout ตอนส่งคำสั่ง: หาออเดอร์ในระบบแทนการยิงซ้ำ"""
+        for attempt in range(1, max_attempts + 1):
+            open_res = self.send_request("GET", "/api/v1/digital-asset/order/open/inquiry")
+            if open_res and open_res.get("code") == "0000":
+                for order in open_res.get("data") or []:
+                    if order.get("symbol") == self.symbol and int(order.get("side", -1)) == int(side):
+                        logger.info(
+                            f"[{self.symbol}] พบออเดอร์ค้างในระบบหลัง timeout: {order.get('orderId')}"
+                        )
+                        self.state["pending_order"] = None
+                        self.save_state()
+                        return {"code": "0000", "data": order}
+
+            hist_res = self.send_request(
+                "POST", "/api/v1/digital-asset/order/history/inquiry",
+                body={"symbol": self.symbol},
+            )
+            if hist_res and hist_res.get("code") == "0000":
+                for order in hist_res.get("data") or []:
+                    if order.get("symbol") and order.get("symbol") != self.symbol:
+                        continue
+                    try:
+                        order_side = int(order.get("side", -1))
+                    except (TypeError, ValueError):
+                        continue
+                    if order_side != int(side):
+                        continue
+                    logger.info(
+                        f"[{self.symbol}] พบออเดอร์ในประวัติหลัง timeout: {order.get('orderId')}"
+                    )
+                    self.state["pending_order"] = None
+                    self.save_state()
+                    return {"code": "0000", "data": order}
+
+            logger.info(
+                f"[{self.symbol}] ยังไม่เจอออเดอร์หลัง timeout (ครั้งที่ {attempt}/{max_attempts})"
+            )
+            time.sleep(delay_sec)
+
+        logger.error(
+            f"[{self.symbol}] timeout แล้วยังไม่เจอออเดอร์ในระบบ — จะไม่ยิงซ้ำ "
+            f"(pending_order ค้างไว้จนกว่าจะหมดอายุ)"
+        )
+        return None
+
     def execute_market_order(self, side, value=None, quantity=None):
         if side == 0 and value is not None and value < self.MIN_ORDER_THB:
             logger.warning(f"ยกเลิกคำสั่งซื้อ: มูลค่า {value} THB ต่ำกว่าขั้นต่ำ {self.MIN_ORDER_THB} THB")
             return None
 
-        path = "/api/v1/digital-asset/order/send"
+        if self._has_unresolved_order():
+            pending_side = (self.state.get("pending_order") or {}).get("side", side)
+            logger.warning(
+                f"[{self.symbol}] มีคำสั่งที่ timeout ค้างอยู่ — ไม่ยิงซ้ำ กำลังตรวจสถานะในระบบ"
+            )
+            return self._recover_order_after_timeout(pending_side)
+
+        path = ORDER_SEND_PATH
         body = {"symbol": self.symbol, "timeInForce": 1, "side": side, "orderType": 1}
         if side == 0 and value is not None:
             body["value"] = round(value, 2)
@@ -873,9 +1109,24 @@ class InnovestXTradingBot:
             body["quantity"] = quantity
 
         logger.info(f"กำลังส่งคำสั่งเทรด: {'ซื้อ' if side == 0 else 'ขาย'} -> {body}")
-        return self.send_request("POST", path, body=body)
+        res = self.send_request("POST", path, body=body)
 
-    def confirm_fill_price(self, order_id, max_attempts=5, delay_sec=1.5):
+        if res and res.get("code") == "TIMEOUT_INDETERMINATE":
+            self.state["pending_order"] = {
+                "side": side,
+                "value": value,
+                "quantity": quantity,
+                "ts": time.time(),
+            }
+            self.save_state()
+            recovered = self._recover_order_after_timeout(side)
+            return recovered
+
+        if res and res.get("code") == "0000":
+            self.state["pending_order"] = None
+        return res
+
+    def confirm_fill_price(self, order_id, max_attempts=8, delay_sec=1.5):
         """Poll ยืนยันราคาเฉลี่ยที่ match จริง แทนการ sleep คงที่"""
         path = "/api/v1/digital-asset/order/history/inquiry"
         body = {"symbol": self.symbol, "orderId": order_id}
@@ -1196,6 +1447,9 @@ class InnovestXTradingBot:
             return
 
         order_res = self.execute_market_order(side=1, quantity=sell_qty_str)
+        if order_res and order_res.get("code") == "TIMEOUT_INDETERMINATE":
+            logger.error(f"[{self.symbol}] timeout ตอนขาย — ไม่ถือว่าขายสำเร็จ จะไม่ยิงซ้ำ")
+            return
         if not (order_res and order_res.get("code") == "0000"):
             logger.warning(f"สั่งขายล้มเหลว: {order_res}")
             return
@@ -1209,19 +1463,78 @@ class InnovestXTradingBot:
         if sell_avg_price > 0 and current_price is not None:
             self._check_slippage(current_price, sell_avg_price, "ขาย")
 
-        entry_price = self.state["entry_price"]
-        pnl_thb = (sell_avg_price - entry_price) * sell_qty if sell_avg_price > 0 else 0.0
+        entry_price = float(self.state.get("entry_price") or 0.0)
+        fee_pct = self.state.get("roundtrip_fee_percent", self.DEFAULT_ROUNDTRIP_FEE_PERCENT)
 
-        if sell_avg_price == 0.0:
-            logger.warning("ยืนยันราคาขายจริงไม่ได้ — ข้าม PnL tracking รอบนี้ (ตรวจสอบ order ด้วยมือ)")
-            self.state.update({"status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
+        if sell_avg_price <= 0:
+            _, coin_left, still_pending = self.get_free_balance()
+            dust = float(self.get_symbol_rules()["quantity_increment"])
+            if still_pending:
+                logger.warning(
+                    f"[{self.symbol}] ขายแล้วยัง matching อยู่ — คง HOLDING ไว้ ไม่ถือว่าขายสำเร็จ"
+                )
+                return
+            if coin_left > dust:
+                logger.warning(
+                    f"[{self.symbol}] ยืนยันราคาขายไม่ได้ และยังมีเหรียญในพอร์ต {coin_left} "
+                    f"— คง HOLDING ไม่ถือว่าขายสำเร็จ"
+                )
+                return
+            logger.warning(
+                f"[{self.symbol}] เหรียญหมดจากพอร์ตแต่ยืนยันราคาขายไม่ได้ — ตั้ง IDLE โดยไม่บันทึก PnL"
+            )
+            self.state.update({
+                "status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0,
+                "pending_order": None,
+            })
             self.save_state()
             return
 
-        logger.info(f"✔ ขายสำเร็จ ราคาเฉลี่ย {sell_avg_price or 'N/A'} PnL รอบนี้ {pnl_thb:.2f} THB")
+        pnl_thb = net_pnl_thb(entry_price, sell_avg_price, sell_qty, fee_pct)
+        logger.info(
+            f"✔ ขายสำเร็จ ราคาเฉลี่ย {sell_avg_price} PnL สุทธิหลังหักค่าธรรมเนียม "
+            f"{fee_pct:.3f}% = {pnl_thb:.2f} THB"
+        )
 
-        self.state.update({"status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
+        self.state.update({
+            "status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0,
+            "pending_order": None,
+        })
         self._register_trade_result(pnl_thb)
+
+    def resume_from_halt(self):
+        """ปลด HALTED ระดับเหรียญจากหน้าเว็บ — ถ้ายังมีของค้าง ให้ถือเป็น HOLDING ด้วยราคาตลาด"""
+        _, coin_free, has_pending = self.get_free_balance()
+        if has_pending:
+            logger.warning(f"[{self.symbol}] ยังมีออเดอร์ค้าง — ยังไม่ปลด HALTED รอรอบถัดไป")
+            return False
+        rules = self.get_symbol_rules()
+        dust_threshold = float(rules["quantity_increment"])
+        if coin_free > dust_threshold:
+            px = self.get_latest_price()
+            if not px:
+                logger.error(f"[{self.symbol}] ปลด HALTED ไม่ได้ชั่วคราว: ดึงราคาตลาดไม่ได้")
+                return False
+            logger.warning(
+                f"[{self.symbol}] ปลด HALTED ตามคำขอจากหน้าเว็บ: ยังมี {coin_free} เหรียญ "
+                f"— ตั้ง HOLDING ต้นทุนประมาณ {px} (ราคาตลาด ณ ตอนปลด) เพื่อให้บอทขายต่อได้"
+            )
+            self.state.update({
+                "status": "HOLDING",
+                "entry_price": px,
+                "highest_price": max(px, float(self.state.get("highest_price") or 0.0)),
+                "quantity": coin_free,
+                "halt_cleared_by_user": True,
+            })
+            self.save_state()
+            return True
+        logger.info(f"[{self.symbol}] ปลด HALTED ตามคำขอจากหน้าเว็บ: ไม่มีเหรียญค้าง — กลับ IDLE")
+        self.state.update({
+            "status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0,
+            "halt_cleared_by_user": True,
+        })
+        self.save_state()
+        return True
 
     # ==================== Main loop ====================
     def poll_price(self):
@@ -1663,6 +1976,10 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         if s not in watchlist
     ]
     display_symbols = list(dict.fromkeys(watchlist + pending_remove))
+    halted_coins = [
+        s for s in display_symbols
+        if (states_by_symbol.get(s) or {}).get("status") == "HALTED"
+    ]
 
     holding_symbols = []
     newest_ts = None
@@ -1691,6 +2008,8 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
 
     holding_count = len(holding_symbols)
     if account_halted:
+        status_class, status_label = "status-halted", "HALTED"
+    elif halted_coins:
         status_class, status_label = "status-halted", "HALTED"
     elif holding_count:
         status_class, status_label = "status-holding", f"HOLDING {holding_count}"
@@ -1742,6 +2061,14 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         banners.append(
             f'<div class="banner banner-danger">บอทหยุดเปิดไม้ใหม่ — {reason} '
             f"(โพซิชันที่ถืออยู่ยังถูกดูแลต่อ / ปลดล็อกอัตโนมัติวันถัดไป หรือกดปลดล็อกด้านล่าง)</div>"
+        )
+
+    if halted_coins:
+        names = ", ".join(_display_symbol(s) for s in halted_coins)
+        banners.append(
+            f'<div class="banner banner-danger">เหรียญค้างโดยไม่รู้ต้นทุน: {names} '
+            f"— กดปลดล็อกด้านล่าง เพื่อให้บอทถือต่อด้วยราคาตลาดแล้วขายได้ "
+            f"(ของเดิมปลดจากเว็บไม่ได้)</div>"
         )
 
     if control.get("paused"):
@@ -1836,6 +2163,8 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             if current is not None and entry:
                 d = (current - entry) / entry * 100
                 chips.append(f'<span class="chip {"up" if d >= 0 else "down"}">{d:+.2f}% จากต้นทุน</span>')
+        elif status == "HALTED":
+            chips.append('<span class="chip down">HALTED — ของค้างไม่รู้ต้นทุน</span>')
         else:
             chips.append('<span class="chip" >เฝ้าอยู่</span>')
         if trend.get("should_buy") and status != "HOLDING":
@@ -1864,6 +2193,8 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             )
         if status == "HOLDING":
             sub = f"ต้นทุน {_fmt_thb(float(st.get('entry_price', 0) or 0))} ฿ · ดูแลด้วย trailing / stop loss แบบเดิม"
+        elif status == "HALTED":
+            sub = "ของค้างไม่รู้ต้นทุน — กดปลดล็อกด้านล่าง เพื่อให้บอทถือต่อด้วยราคาตลาดแล้วขายได้"
         elif elapsed and elapsed < 7200:
             sub = "รอข้อมูลครบ 2 ชั่วโมงก่อนเริ่มประเมินเข้าซื้อ"
         else:
@@ -1924,10 +2255,17 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
     )
 
     unlock_button_html = ""
-    if account_halted:
+    if account_halted or halted_coins:
+        if account_halted:
+            unlock_label = "บอทถูกล็อกไม่ให้เปิดไม้ใหม่ (HALTED)"
+            unlock_sub = reason or "Circuit breaker ทำงาน"
+        else:
+            names = ", ".join(_display_symbol(s) for s in halted_coins)
+            unlock_label = "มีเหรียญค้างโดยไม่รู้ต้นทุน (HALTED)"
+            unlock_sub = f"{names} — กดปลดล็อกเพื่อให้บอทถือต่อด้วยราคาตลาดปัจจุบัน แล้วขายได้"
         unlock_button_html = f'''<form class="control-card halted" method="POST" action="/control/unlock">
-      <div class="control-label">บอทถูกล็อกไม่ให้เปิดไม้ใหม่ (HALTED)</div>
-        <div class="control-sub">{reason}</div>
+      <div class="control-label">{unlock_label}</div>
+        <div class="control-sub">{unlock_sub}</div>
         <div class="field-row">
       {password_field_html}
       <button type="submit" class="btn btn-danger">ปลดล็อกตอนนี้</button>
@@ -2110,15 +2448,17 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
                 raw_add = fields.get("add_symbols", [""])[0]
                 added = []
+                catalog = fetch_exchange_symbol_catalog()
                 for item in re.split(r"[\s,]+", raw_add.strip()):
                     item = item.strip().upper()
                     if not item:
                         continue
-                    if not SYMBOL_RE.match(item):
-                        logger.warning(f"[เว็บควบคุม] ปฏิเสธเหรียญ: รูปแบบไม่ถูกต้อง ({item})")
+                    sym, err = validate_watchlist_symbol(item, catalog=catalog)
+                    if err:
+                        logger.warning(f"[เว็บควบคุม] ปฏิเสธเหรียญ: {err}")
                         continue
-                    if item not in new_watchlist and item not in added:
-                        added.append(item)
+                    if sym not in new_watchlist and sym not in added:
+                        added.append(sym)
                 new_watchlist.extend(added)
 
                 control["watchlist"] = new_watchlist
@@ -2242,7 +2582,8 @@ if __name__ == "__main__":
     control = load_control()
     save_control(control)
 
-    bots = {}
+    bots = LIVE_BOTS
+    install_shutdown_handlers()
 
     def get_or_create_bot(symbol):
         if symbol not in bots:
@@ -2303,10 +2644,16 @@ if __name__ == "__main__":
                 risk["status"] = "IDLE"
                 risk["consecutive_losses"] = 0
                 save_shared_risk(risk)
-            # ไม่แตะ per-coin HALTED จาก reconcile (เหรียญค้างโดยไม่รู้ต้นทุน)
-            # เหรียญพวกนั้นจะกลับ IDLE เองเมื่อ reconcile เห็นว่าเหรียญในพอร์ตหมดแล้ว
-            control["unlock_requested"] = False
-            save_control(control)
+            resume_failed = False
+            for bot in bots.values():
+                if bot.state.get("status") == "HALTED":
+                    if not bot.resume_from_halt():
+                        resume_failed = True
+            if not resume_failed:
+                control["unlock_requested"] = False
+                save_control(control)
+            else:
+                logger.warning("ปลด HALTED บางเหรียญไม่สำเร็จ — จะลองใหม่ในรอบถัดไป")
 
         if bots:
             maybe_reset_shared_daily(bots)
@@ -2400,5 +2747,5 @@ if __name__ == "__main__":
 
     for bot in bots.values():
         bot.save_state()
-        bot.save_market()
+        bot.save_market(force_history=True)
     logger.info("บอทหยุดทำงานเรียบร้อย (state ถูกบันทึกแล้ว)")
