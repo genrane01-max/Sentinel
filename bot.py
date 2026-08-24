@@ -2908,7 +2908,7 @@ if __name__ == "__main__":
     health_thread = threading.Thread(target=start_dummy_health_check_server, daemon=True)
     health_thread.start()
 
-    POLL_INTERVAL_SEC = 10
+    POLL_INTERVAL_SEC = 15
 
     control = load_control()
     save_control(control)
