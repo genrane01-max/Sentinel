@@ -139,7 +139,8 @@ HOUR3_VETO_PERCENT = -1.5        # ชม.3 ลงแรงกว่านี้
 MIN_CONFIDENCE_TO_BUY = 80
 MAX_SPREAD_PERCENT = 0.5         # ไม่ซื้อถ้า (ask-bid)/mid กว้างเกินนี้ (%)
 ORDER_SEND_PATH = "/api/v1/digital-asset/order/send"
-PENDING_ORDER_TTL_SEC = 120
+PENDING_ORDER_TTL_SEC = 600  # ล็อกกันยิงซ้ำอย่างน้อย 10 นาที — ห้ามปลดแค่เพราะหมดเวลาถ้ายังไม่เช็คพอร์ต
+RECENT_ORDER_LOOKBACK_SEC = 180
 MARKET_HISTORY_FLUSH_SEC = 120
 PRICE_TICK_MIN_INTERVAL_SEC = 60
 PRICE_TICK_MIN_MOVE_PERCENT = 0.05
@@ -327,6 +328,57 @@ def net_pnl_thb(entry_price, sell_price, qty, roundtrip_fee_percent):
     buy_cost = entry_price * qty * (1.0 + one_way)
     sell_proceeds = sell_price * qty * (1.0 - one_way)
     return sell_proceeds - buy_cost
+
+
+def parse_order_timestamp(order):
+    """แปลงเวลาสร้างออเดอร์เป็น epoch วินาที — รองรับ ms / วินาที / ISO"""
+    if not isinstance(order, dict):
+        return None
+    for key in (
+        "transactTime", "createdTime", "createTime", "createdAt",
+        "timestamp", "time", "orderTime", "updatedTime", "updateTime",
+    ):
+        raw = order.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            val = float(raw)
+            if val > 1e12:
+                return val / 1000.0
+            if val > 1e9:
+                return val
+        except (TypeError, ValueError):
+            pass
+        try:
+            text = str(raw).strip().replace("Z", "+00:00")
+            dt = datetime.fromisoformat(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def order_is_recent_match(order, symbol, side, since_ts, allow_open_without_time=False):
+    """จับออเดอร์ของเหรียญ/ฝั่งเดียวกันที่เกิดหลัง since_ts — กันไปเจอไม้เก่า"""
+    if not isinstance(order, dict):
+        return False
+    order_symbol = str(order.get("symbol") or "").upper()
+    if order_symbol and order_symbol != str(symbol or "").upper():
+        return False
+    try:
+        if int(order.get("side", -1)) != int(side):
+            return False
+    except (TypeError, ValueError):
+        return False
+    ts = parse_order_timestamp(order)
+    if ts is None:
+        if not allow_open_without_time:
+            return False
+        state = str(order.get("orderState") or order.get("status") or "").lower()
+        return state in ("working", "new", "open", "pending", "partial", "partiallyfilled", "")
+    return ts >= (float(since_ts) - 5.0)
 
 
 def is_mutating_order_path(path):
@@ -1028,33 +1080,41 @@ class InnovestXTradingBot:
         return thb_free, coin_free, has_pending_orders
 
     # ==================== Orders ====================
+    def _dust_threshold(self):
+        rules = self.get_symbol_rules()
+        try:
+            return float(rules["quantity_increment"])
+        except (TypeError, ValueError, KeyError):
+            return 0.0
+
     def _has_unresolved_order(self):
+        """ล็อก pending ยังอยู่หรือไม่ — ไม่ปลดแค่เพราะหมดเวลา ต้องเคลียร์จากพอร์ต/ออเดอร์จริง"""
         pending = self.state.get("pending_order") or {}
-        if not pending:
-            return False
-        age = time.time() - float(pending.get("ts") or 0)
-        if age > PENDING_ORDER_TTL_SEC:
-            logger.warning(
-                f"[{self.symbol}] pending_order อายุ {age:.0f} วิ เกิน {PENDING_ORDER_TTL_SEC} วิ "
-                f"— ถือว่าออเดอร์ไม่เข้า อนุญาตยิงใหม่"
-            )
-            self.state["pending_order"] = None
-            self.save_state()
-            return False
-        return True
+        return bool(pending)
+
+    def _pending_since_ts(self):
+        pending = self.state.get("pending_order") or {}
+        try:
+            ts = float(pending.get("ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if ts <= 0:
+            return time.time() - RECENT_ORDER_LOOKBACK_SEC
+        return ts
 
     def _recover_order_after_timeout(self, side, max_attempts=5, delay_sec=1.5):
-        """หลัง timeout ตอนส่งคำสั่ง: หาออเดอร์ในระบบแทนการยิงซ้ำ"""
+        """หลัง timeout ตอนส่งคำสั่ง: หาออเดอร์ล่าสุดในระบบแทนการยิงซ้ำ — ไม่จับไม้เก่า"""
+        since_ts = self._pending_since_ts()
         for attempt in range(1, max_attempts + 1):
             open_res = self.send_request("GET", "/api/v1/digital-asset/order/open/inquiry")
             if open_res and open_res.get("code") == "0000":
                 for order in open_res.get("data") or []:
-                    if order.get("symbol") == self.symbol and int(order.get("side", -1)) == int(side):
+                    if order_is_recent_match(
+                        order, self.symbol, side, since_ts, allow_open_without_time=True
+                    ):
                         logger.info(
                             f"[{self.symbol}] พบออเดอร์ค้างในระบบหลัง timeout: {order.get('orderId')}"
                         )
-                        self.state["pending_order"] = None
-                        self.save_state()
                         return {"code": "0000", "data": order}
 
             hist_res = self.send_request(
@@ -1063,29 +1123,22 @@ class InnovestXTradingBot:
             )
             if hist_res and hist_res.get("code") == "0000":
                 for order in hist_res.get("data") or []:
-                    if order.get("symbol") and order.get("symbol") != self.symbol:
-                        continue
-                    try:
-                        order_side = int(order.get("side", -1))
-                    except (TypeError, ValueError):
-                        continue
-                    if order_side != int(side):
-                        continue
-                    logger.info(
-                        f"[{self.symbol}] พบออเดอร์ในประวัติหลัง timeout: {order.get('orderId')}"
-                    )
-                    self.state["pending_order"] = None
-                    self.save_state()
-                    return {"code": "0000", "data": order}
+                    if order_is_recent_match(
+                        order, self.symbol, side, since_ts, allow_open_without_time=False
+                    ):
+                        logger.info(
+                            f"[{self.symbol}] พบออเดอร์ล่าสุดในประวัติหลัง timeout: {order.get('orderId')}"
+                        )
+                        return {"code": "0000", "data": order}
 
             logger.info(
-                f"[{self.symbol}] ยังไม่เจอออเดอร์หลัง timeout (ครั้งที่ {attempt}/{max_attempts})"
+                f"[{self.symbol}] ยังไม่เจอออเดอร์ล่าสุดหลัง timeout (ครั้งที่ {attempt}/{max_attempts})"
             )
             time.sleep(delay_sec)
 
         logger.error(
-            f"[{self.symbol}] timeout แล้วยังไม่เจอออเดอร์ในระบบ — จะไม่ยิงซ้ำ "
-            f"(pending_order ค้างไว้จนกว่าจะหมดอายุ)"
+            f"[{self.symbol}] timeout แล้วยังไม่เจอออเดอร์ล่าสุดในระบบ — จะไม่ยิงซ้ำ "
+            f"(จะเช็คยอดเหรียญในพอร์ตก่อนตัดสิน)"
         )
         return None
 
@@ -1125,6 +1178,102 @@ class InnovestXTradingBot:
         if res and res.get("code") == "0000":
             self.state["pending_order"] = None
         return res
+
+    def _wait_for_coin_balance(self, dust_threshold, max_attempts=6, delay_sec=1.0):
+        last = (0.0, 0.0, False)
+        for _ in range(max_attempts):
+            last = self.get_free_balance()
+            _, coin_free, has_pending = last
+            if float(coin_free or 0) > dust_threshold:
+                return last
+            time.sleep(delay_sec)
+            if has_pending:
+                continue
+        return last
+
+    def _adopt_filled_buy(self, avg_price, qty, fee_pct):
+        self.state.update({
+            "status": "HOLDING",
+            "entry_price": avg_price,
+            "highest_price": avg_price,
+            "quantity": qty,
+            "roundtrip_fee_percent": fee_pct,
+            "pending_order": None,
+        })
+        self.save_state()
+
+    def _halt_unknown_buy_cost(self, qty):
+        """มีเหรียญเข้าพอร์ตแต่ไม่รู้ต้นทุน — ห้ามเดาราคา ห้ามซื้อซ้ำ"""
+        self.state.update({
+            "status": "HALTED",
+            "entry_price": 0.0,
+            "highest_price": 0.0,
+            "quantity": qty,
+            "pending_order": None,
+            "halt_cleared_by_user": False,
+        })
+        self.save_state()
+
+    def _finalize_buy(self, order_id=None, expected_buy=None, buy_value=None):
+        """จบขั้นตอนซื้อด้วยของจริงในพอร์ต — ไม่เดาราคา offer, ไม่เดาจำนวน"""
+        dust = self._dust_threshold()
+        avg_price = 0.0
+        if order_id:
+            avg_price = self.confirm_fill_price(order_id) or 0.0
+
+        _, coin_free, still_pending = self._wait_for_coin_balance(dust)
+        rules = self.get_symbol_rules()
+
+        if float(coin_free or 0) > dust:
+            qty = self._floor_to_increment(coin_free, rules["quantity_increment"])
+            if avg_price > 0:
+                if expected_buy:
+                    self._check_slippage(expected_buy, avg_price, "ซื้อ")
+                fee_pct = self.estimate_roundtrip_fee_percent()
+                self._adopt_filled_buy(avg_price, qty, fee_pct)
+                logger.info(
+                    f"[{self.symbol}] ซื้อสำเร็จ ต้นทุนจริง {avg_price} THB จำนวนจริงในพอร์ต {qty}"
+                    + (f" (ส่งคำสั่งมูลค่า {buy_value:.2f} THB)" if buy_value else "")
+                    + f", ค่าธรรมเนียม round-trip โดยประมาณ {fee_pct:.3f}%"
+                )
+                return True
+            logger.error(
+                f"[{self.symbol}] มีเหรียญเข้าพอร์ต {qty} แต่ยืนยันราคาจับคู่ไม่ได้ "
+                f"— HALTED ไม่เดาราคา offer (ปลดจากหน้าเว็บได้)"
+            )
+            self._halt_unknown_buy_cost(qty)
+            return False
+
+        if still_pending:
+            logger.warning(
+                f"[{self.symbol}] ออเดอร์ยัง matching และยังไม่มีเหรียญในพอร์ต "
+                f"— คง pending ไว้ ไม่ยิงซ้ำ"
+            )
+            return False
+
+        self.state["pending_order"] = None
+        self.save_state()
+        logger.warning(f"[{self.symbol}] ซื้อไม่สำเร็จ: ไม่มีเหรียญเข้าพอร์ต")
+        return False
+
+    def _settle_pending_buy(self):
+        pending = self.state.get("pending_order") or {}
+        try:
+            pending_side = int(pending.get("side", 0))
+        except (TypeError, ValueError):
+            pending_side = 0
+        if pending_side == 1:
+            logger.warning(f"[{self.symbol}] มี pending ขายค้าง — ไม่เปิดไม้ซื้อทับ")
+            return False
+        recovered = self._recover_order_after_timeout(0)
+        order_id = None
+        if recovered and recovered.get("code") == "0000":
+            order_id = (recovered.get("data") or {}).get("orderId")
+        return self._finalize_buy(
+            order_id=order_id,
+            expected_buy=None,
+            buy_value=pending.get("value"),
+        )
 
     def confirm_fill_price(self, order_id, max_attempts=8, delay_sec=1.5):
         """Poll ยืนยันราคาเฉลี่ยที่ match จริง แทนการ sleep คงที่"""
@@ -1305,6 +1454,10 @@ class InnovestXTradingBot:
         if self.state["status"] != "IDLE":
             return False
 
+        if self._has_unresolved_order():
+            logger.warning(f"[{self.symbol}] มี pending หลัง timeout — เคลียร์จากพอร์ต ไม่ยิงคำสั่งใหม่")
+            return self._settle_pending_buy()
+
         quote = self.state.get("quote") or {}
         spread = quote.get("spread_pct")
         if spread is not None and spread > MAX_SPREAD_PERCENT:
@@ -1314,9 +1467,17 @@ class InnovestXTradingBot:
             return False
         expected_buy = quote_mark_price(quote, "buy") or current_price
 
-        thb_free, _, has_pending = self.get_free_balance()
+        thb_free, coin_free, has_pending = self.get_free_balance()
+        dust = self._dust_threshold()
         if has_pending:
             logger.info(f"[{self.symbol}] ข้ามการซื้อ: มีออเดอร์ค้างอยู่ในระบบ")
+            return False
+        if float(coin_free or 0) > dust:
+            logger.error(
+                f"[{self.symbol}] state บอก IDLE แต่มีเหรียญในพอร์ต {coin_free} "
+                f"— ไม่ซื้อทับ ตั้ง HALTED จนกว่าจะรู้ต้นทุน"
+            )
+            self._halt_unknown_buy_cost(coin_free)
             return False
         if thb_free <= self.MIN_ORDER_THB:
             logger.info(f"[{self.symbol}] เงินว่างไม่พอสำหรับซื้อขั้นต่ำ (คงเหลือ {thb_free:.2f} THB)")
@@ -1325,7 +1486,6 @@ class InnovestXTradingBot:
         slots = max(1, int(available_slots or 1))
         while slots > 1 and round((thb_free / slots) * (self.trade_size_percent / 100.0), 2) < self.MIN_ORDER_THB:
             slots -= 1
-        rules = self.get_symbol_rules()
         buy_value = round((thb_free / slots) * (self.trade_size_percent / 100.0), 2)
         if buy_value < self.MIN_ORDER_THB:
             logger.info(
@@ -1334,48 +1494,20 @@ class InnovestXTradingBot:
             return False
         order_res = self.execute_market_order(side=0, value=buy_value)
 
-        if not (order_res and order_res.get("code") == "0000"):
-            logger.warning(f"[{self.symbol}] ยิงออเดอร์ซื้อล้มเหลว: {order_res}")
-            return False
+        order_id = None
+        if order_res and order_res.get("code") == "0000":
+            order_id = (order_res.get("data") or {}).get("orderId")
+            if order_id:
+                logger.info(f"[{self.symbol}] ✔ ส่งคำสั่งซื้อสำเร็จ Order ID: {order_id} กำลังยืนยันจากพอร์ตจริง...")
+            else:
+                logger.warning(f"[{self.symbol}] ได้ code 0000 แต่ไม่มี orderId — จะเช็คยอดเหรียญในพอร์ต")
+        else:
+            logger.warning(
+                f"[{self.symbol}] ยิงออเดอร์ซื้อไม่ยืนยันสำเร็จ: {order_res} "
+                f"— จะเช็คยอดเหรียญในพอร์ตก่อน ห้ามยิงซ้ำถ้าของเข้าแล้ว"
+            )
 
-        order_id = (order_res.get("data") or {}).get("orderId")
-        if not order_id:
-            logger.warning(f"[{self.symbol}] ซื้อสำเร็จแต่ไม่มี orderId: {order_res}")
-            return False
-        logger.info(f"[{self.symbol}] ✔ ส่งคำสั่งซื้อสำเร็จ Order ID: {order_id} กำลังยืนยันราคาจับคู่จริง...")
-
-        avg_price = self.confirm_fill_price(order_id)
-        if not avg_price:
-            avg_price = expected_buy or current_price
-            logger.warning(f"[{self.symbol}] ยืนยันราคาจับคู่จริงไม่ได้ ใช้ราคา offer ณ ขณะนั้นแทน (ควรตรวจสอบ order ด้วยมือ)")
-        if not avg_price:
-            logger.error(f"[{self.symbol}] ไม่มีราคาสำหรับคำนวณจำนวนเหรียญ — ตั้ง HOLDING ชั่วคราว รอ reconcile")
-            self.state.update({"status": "HOLDING", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0})
-            self.save_state()
-            return True
-
-        self._check_slippage(expected_buy or current_price, avg_price, "ซื้อ")
-
-        fee_pct = self.estimate_roundtrip_fee_percent()
-        one_way_fee_factor = (fee_pct / 2) / 100
-
-        raw_qty = (buy_value / avg_price) * (1 - one_way_fee_factor)
-        estimated_qty = self._floor_to_increment(raw_qty, rules["quantity_increment"])
-
-        self.state.update({
-            "status": "HOLDING",
-            "entry_price": avg_price,
-            "highest_price": avg_price,
-            "quantity": estimated_qty,
-            "roundtrip_fee_percent": fee_pct,
-        })
-        self.save_state()
-
-        logger.info(
-            f"[{self.symbol}] ซื้อสำเร็จ ต้นทุนเฉลี่ย {avg_price} THB จำนวน {estimated_qty} "
-            f"(ใช้เงิน {buy_value:.2f} จาก {slots} ช่องว่าง, ค่าธรรมเนียม round-trip โดยประมาณ {fee_pct:.3f}%)"
-        )
-        return True
+        return self._finalize_buy(order_id=order_id, expected_buy=expected_buy, buy_value=buy_value)
 
     def run_strategy(self, current_price):
         if self.state["status"] == "IDLE":

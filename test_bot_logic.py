@@ -1,5 +1,6 @@
 """Unit tests for Sentinel bot helpers — no API / Firebase required."""
 import sys
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -302,6 +303,141 @@ class OrderSafetyTests(unittest.TestCase):
             self.assertEqual(sig.call_count, 2)  # SIGINT + SIGTERM ครั้งเดียว
         bot._SHUTDOWN_HANDLERS_INSTALLED = True
 
+    def test_pending_does_not_expire_by_time_alone(self):
+        b = bot.InnovestXTradingBot("k", "s", symbol="ADAUSDT")
+        b.state["pending_order"] = {"side": 0, "ts": time.time() - 10_000, "value": 200}
+        self.assertTrue(b._has_unresolved_order())
+
+
+class OrderMatchTests(unittest.TestCase):
+    def test_parse_epoch_ms_and_iso(self):
+        self.assertAlmostEqual(bot.parse_order_timestamp({"transactTime": 1_700_000_000_000}), 1_700_000_000.0)
+        self.assertAlmostEqual(bot.parse_order_timestamp({"createdAt": 1_700_000_000}), 1_700_000_000.0)
+        ts = bot.parse_order_timestamp({"time": "2024-01-01T00:00:00Z"})
+        self.assertIsNotNone(ts)
+
+    def test_ignores_old_history_order(self):
+        now = time.time()
+        old = {"symbol": "BTCTHB", "side": 0, "orderId": "old", "transactTime": (now - 86400) * 1000}
+        recent = {"symbol": "BTCTHB", "side": 0, "orderId": "new", "transactTime": now * 1000}
+        self.assertFalse(bot.order_is_recent_match(old, "BTCTHB", 0, now - 10))
+        self.assertTrue(bot.order_is_recent_match(recent, "BTCTHB", 0, now - 10))
+
+    def test_history_without_timestamp_is_not_matched(self):
+        order = {"symbol": "BTCTHB", "side": 0, "orderId": "mystery"}
+        self.assertFalse(bot.order_is_recent_match(order, "BTCTHB", 0, time.time() - 10))
+
+    def test_open_order_without_timestamp_is_matched(self):
+        order = {"symbol": "BTCTHB", "side": 0, "orderId": "live", "orderState": "Working"}
+        self.assertTrue(
+            bot.order_is_recent_match(order, "BTCTHB", 0, time.time() - 10, allow_open_without_time=True)
+        )
+
+
+class BuyPathTests(unittest.TestCase):
+    def _bot(self, symbol="BTCTHB"):
+        b = bot.InnovestXTradingBot("k", "s", symbol=symbol)
+        b.save_state = lambda: None
+        b.save_market = lambda **k: None
+        b.get_symbol_rules = lambda: {
+            "quantity_increment": "0.00001000",
+            "price_increment": "0.01",
+            "decimal_places": 8,
+        }
+        b.estimate_roundtrip_fee_percent = lambda: 0.4
+        b.state["status"] = "IDLE"
+        b.state["quote"] = {"bid": 99.0, "ask": 100.0, "last": 99.5, "spread_pct": 0.1}
+        return b
+
+    def test_does_not_buy_if_coins_already_in_wallet(self):
+        b = self._bot()
+        b.get_free_balance = lambda: (5000.0, 0.01, False)
+
+        def boom(**kwargs):
+            raise AssertionError("must not send buy when coins already exist")
+
+        b.execute_market_order = boom
+        with patch("bot.time.sleep", return_value=None):
+            ok = b.try_enter_position(100.0)
+        self.assertFalse(ok)
+        self.assertEqual(b.state["status"], "HALTED")
+        self.assertEqual(b.state["entry_price"], 0.0)
+
+    def test_uses_actual_wallet_qty_not_estimate(self):
+        b = self._bot("ETHTHB")
+        calls = {"n": 0}
+
+        def fake_balance():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return (5000.0, 0.0, False)
+            return (4000.0, 0.01234567, False)
+
+        b.get_free_balance = fake_balance
+        b.execute_market_order = lambda **kw: {"code": "0000", "data": {"orderId": "oid-1"}}
+        b.confirm_fill_price = lambda *a, **k: 101.5
+        with patch("bot.time.sleep", return_value=None):
+            ok = b.try_enter_position(100.0)
+        self.assertTrue(ok)
+        self.assertEqual(b.state["status"], "HOLDING")
+        self.assertAlmostEqual(b.state["entry_price"], 101.5)
+        self.assertAlmostEqual(b.state["quantity"], 0.01234)
+
+    def test_unknown_fill_price_with_coins_halts_instead_of_guessing_offer(self):
+        b = self._bot("SOLTHB")
+        calls = {"n": 0}
+
+        def fake_balance():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return (5000.0, 0.0, False)
+            return (4000.0, 0.02, False)
+
+        b.get_free_balance = fake_balance
+        b.execute_market_order = lambda **kw: {"code": "0000", "data": {"orderId": "oid-2"}}
+        b.confirm_fill_price = lambda *a, **k: 0.0
+        with patch("bot.time.sleep", return_value=None):
+            ok = b.try_enter_position(100.0)
+        self.assertFalse(ok)
+        self.assertEqual(b.state["status"], "HALTED")
+        self.assertEqual(b.state["entry_price"], 0.0)
+        self.assertGreater(b.state["quantity"], 0)
+
+    def test_timeout_then_coins_arrive_does_not_resend(self):
+        b = self._bot("XRPTHB")
+        sent = {"n": 0}
+        balances = {"n": 0}
+
+        def fake_send(method, path, query="", body=None, _retry_count=0):
+            if path.endswith("/order/send"):
+                sent["n"] += 1
+                return {"code": "TIMEOUT_INDETERMINATE", "path": path}
+            if path.endswith("/order/open/inquiry"):
+                return {"code": "0000", "data": []}
+            if path.endswith("/order/history/inquiry"):
+                return {"code": "0000", "data": []}
+            return {"code": "0000", "data": []}
+
+        def fake_balance():
+            balances["n"] += 1
+            if balances["n"] == 1:
+                return (5000.0, 0.0, False)
+            return (4000.0, 0.03, False)
+
+        b.send_request = fake_send
+        b.get_free_balance = fake_balance
+        b.confirm_fill_price = lambda *a, **k: 0.0
+        with patch("bot.time.sleep", return_value=None):
+            ok = b.try_enter_position(100.0)
+        self.assertFalse(ok)
+        self.assertEqual(sent["n"], 1)
+        self.assertEqual(b.state["status"], "HALTED")
+        with patch("bot.time.sleep", return_value=None):
+            ok2 = b.try_enter_position(100.0)
+        self.assertFalse(ok2)
+        self.assertEqual(sent["n"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
+
