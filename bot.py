@@ -2144,7 +2144,7 @@ ${password_field_html}
     var ae = document.activeElement;
     if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT")) return;
     location.reload();
-  }, 20000);
+  }, 15000);
 })();
 function addSymbolPick(sym){
   var el = document.getElementById('add-symbols-input');
