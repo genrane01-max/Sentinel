@@ -4,6 +4,7 @@ import time
 import types
 import unittest
 from unittest.mock import patch
+import os
 
 
 def _install_mocks():
@@ -55,6 +56,8 @@ def _install_mocks():
         class ConnectionError(Exception):
             pass
     req.exceptions = _Exc
+    req.post = lambda *a, **k: types.SimpleNamespace(ok=True, status_code=200)
+    req.get = lambda *a, **k: types.SimpleNamespace(ok=True, status_code=200)
     sys.modules["requests"] = req
 
 
@@ -480,6 +483,45 @@ class BuyPathTests(unittest.TestCase):
             ok2 = b.try_enter_position(100.0)
         self.assertFalse(ok2)
         self.assertEqual(sent["n"], 1)
+
+    def test_paused_watch_does_not_buy(self):
+        b = self._bot()
+        b.execute_market_order = lambda **kw: (_ for _ in ()).throw(AssertionError("must not buy"))
+        paused_control = {"paused_symbols": ["BTCTHB"], "watchlist": ["BTCTHB"]}
+        with patch.object(bot, "load_control", return_value=paused_control):
+            ok = b.try_enter_position(100.0)
+        self.assertFalse(ok)
+        self.assertEqual(b.state["status"], "IDLE")
+
+    def test_stop_loss_pauses_watch_and_notifies(self):
+        b = self._bot("ETHTHB")
+        paused = {}
+        notes = []
+        with patch.object(bot, "set_watch_paused", side_effect=lambda *a, **k: paused.update({"sym": a[0], "on": a[1], "reason": k.get("reason")})) as _, \
+             patch.object(bot, "notify_telegram", side_effect=lambda t: notes.append(t)):
+            b._after_successful_sell(-12.5, reason="stop_loss")
+        self.assertEqual(paused["sym"], "ETHTHB")
+        self.assertTrue(paused["on"])
+        self.assertEqual(paused["reason"], "stop_loss")
+        self.assertTrue(any("ตัดขาดทุน" in t for t in notes))
+        self.assertTrue(any("เฝ้าต่อ" in t for t in notes))
+
+
+class WatchPauseTests(unittest.TestCase):
+    def test_apply_pause_and_resume(self):
+        control = {"watchlist": ["ETHTHB", "SOLTHB"], "paused_symbols": []}
+        control = bot.apply_watch_pause(control, "eththb", True, reason="stop_loss")
+        self.assertEqual(control["paused_symbols"], ["ETHTHB"])
+        self.assertEqual(control["pause_reasons"]["ETHTHB"], "stop_loss")
+        self.assertTrue(bot.is_watch_paused("ETHTHB", control))
+        self.assertFalse(bot.is_watch_paused("SOLTHB", control))
+        control = bot.apply_watch_pause(control, "ETHTHB", False)
+        self.assertEqual(control["paused_symbols"], [])
+        self.assertFalse(bot.is_watch_paused("ETHTHB", control))
+
+    def test_notify_skips_without_credentials(self):
+        with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""}):
+            self.assertFalse(bot.notify_telegram("hello"))
 
 
 if __name__ == "__main__":

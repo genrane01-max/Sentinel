@@ -9,6 +9,7 @@ InnovestX Automated Trading Bot — Price Action 2H Strategy
 4. ตัดสินใจซื้อเทียบ offer (ask), ขายเทียบ bid, กันสเปรดกว้าง
 5. แดชบอร์ดใช้สูตรเดียวกับบอท
 6. มีเหรียญแต่ยืนยันราคาจับคู่ไม่ได้ — ถือต่อทันทีด้วยต้นทุนประมาณ แล้วขาย/trailing ได้เลย ไม่รอปลดจากเว็บ
+7. แจ้งเตือน Telegram + หยุดเฝ้าต่อเหรียญหลังตัดขาดทุน (กดเฝ้าต่อเองจากหน้าเว็บ)
 
 ของเดิมยังอยู่ครบ: แดชบอร์ด, หยุด/เริ่มเทรด, รหัสผ่าน, % ขาดทุนต่อวัน, อัตราเงินต่อไม้,
 จำนวนไม้ขาดทุนติดกัน, price_history ต่อเหรียญ, ค่าธรรมเนียม, circuit breaker, Decimal, graceful shutdown
@@ -669,10 +670,25 @@ def load_control():
     fallback_symbol = _normalize_symbol(data.get("active_symbol") or DEFAULT_SYMBOL)
     watchlist = _normalize_watchlist(data.get("watchlist"), fallback_symbol)
 
+    paused_symbols = []
+    for item in data.get("paused_symbols") or []:
+        sym = _normalize_symbol(item)
+        if looks_like_pair(sym) and sym in watchlist and sym not in paused_symbols:
+            paused_symbols.append(sym)
+    pause_reasons = {}
+    raw_reasons = data.get("pause_reasons") or {}
+    if isinstance(raw_reasons, dict):
+        for key, value in raw_reasons.items():
+            sym = _normalize_symbol(key)
+            if sym in paused_symbols:
+                pause_reasons[sym] = str(value or "user")
+
     return {
         "active_symbol": watchlist[0] if watchlist else fallback_symbol,
         "watchlist": watchlist,
         "paused": bool(data.get("paused", False)),
+        "paused_symbols": paused_symbols,
+        "pause_reasons": pause_reasons,
         "max_daily_loss_percent": max_daily_loss_percent,
         "trade_size_percent": trade_size_percent,
         "max_consecutive_losses": max_consecutive_losses,
@@ -692,6 +708,61 @@ def save_control(control):
         primary_ref("bot_control").set(control)
     except Exception as e:
         logger.error(f"บันทึก bot_control ไป Firebase ไม่สำเร็จ: {e}")
+
+
+def notify_telegram(text):
+    """ส่งข้อความสั้นๆ เข้ามือถือ — ไม่มี token/chat แล้วข้ามเงียบๆ ไม่ให้การเทรดพัง"""
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    if not token or not chat_id or not str(text or "").strip():
+        return False
+    try:
+        res = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": str(text).strip(),
+                "disable_web_page_preview": True,
+            },
+            timeout=8,
+        )
+        status = getattr(res, "status_code", 200)
+        if status >= 400:
+            logger.warning(f"ส่ง Telegram ไม่สำเร็จ HTTP {status}")
+            return False
+        return True
+    except Exception as e:
+        logger.warning(f"ส่ง Telegram ไม่สำเร็จ: {e}")
+        return False
+
+
+def is_watch_paused(symbol, control=None):
+    if control is None:
+        control = load_control()
+    paused = {_normalize_symbol(s) for s in (control.get("paused_symbols") or [])}
+    return _normalize_symbol(symbol) in paused
+
+
+def apply_watch_pause(control, symbol, paused, reason="user"):
+    """หยุด/เฝ้าต่อรายเหรียญ — ยังอยู่ในรายการ แต่ไม่เปิดไม้ซื้อ"""
+    control = dict(control or {})
+    symbol = _normalize_symbol(symbol)
+    paused_list = [s for s in (control.get("paused_symbols") or []) if _normalize_symbol(s) != symbol]
+    reasons = dict(control.get("pause_reasons") or {})
+    if paused and looks_like_pair(symbol):
+        paused_list.append(symbol)
+        reasons[symbol] = str(reason or "user")
+    else:
+        reasons.pop(symbol, None)
+    control["paused_symbols"] = paused_list
+    control["pause_reasons"] = reasons
+    return control
+
+
+def set_watch_paused(symbol, paused, reason="user"):
+    control = apply_watch_pause(load_control(), symbol, paused, reason=reason)
+    save_control(control)
+    return control
 
 
 def load_shared_risk():
@@ -1201,6 +1272,8 @@ class InnovestXTradingBot:
             "halt_cleared_by_user": False,
         })
         self.save_state()
+        name = _display_symbol(self.symbol)
+        notify_telegram(f"Sentinel ซื้อ {name}\nต้นทุน {avg_price} จำนวน {qty}")
 
     def _estimate_buy_cost(self, preferred=None):
         """ต้นทุนสำรองเมื่อยืนยัน fill ไม่ได้ — ใช้ offer ตอนซื้อก่อน แล้วค่อยราคาตลาด"""
@@ -1233,6 +1306,9 @@ class InnovestXTradingBot:
                 f"— HALTED ชั่วคราว จะถือต่อเองในรอบถัดไปเมื่อมีราคา (ไม่ต้องปลดจากเว็บ)"
             )
             self._halt_unknown_buy_cost(qty)
+            notify_telegram(
+                f"Sentinel { _display_symbol(self.symbol) } มีเหรียญเข้าพอร์ตแต่ยังไม่มีราคาตลาด — จะถือต่อเองเมื่อมีราคา"
+            )
             return False
         fee_pct = self.estimate_roundtrip_fee_percent()
         latest = _safe_float(quote_mark_price(self.state.get("quote") or {}, "last"), 0.0) or 0.0
@@ -1252,6 +1328,10 @@ class InnovestXTradingBot:
             f"[{self.symbol}] มีเหรียญ {qty} แต่ยืนยันราคาจับคู่ไม่ได้ "
             f"— ถือต่อทันทีด้วยต้นทุนประมาณ {px} (สูงสุดที่เห็น {highest}) "
             f"ไม่รอปลดจากเว็บ เพื่อไม่พลาดการขายตอนเหรียญวิ่ง"
+        )
+        notify_telegram(
+            f"Sentinel ถือ {_display_symbol(self.symbol)} ต่อ\n"
+            f"ต้นทุนประมาณ {px} (ยืนยันราคาจับคู่ไม่ได้) จำนวน {qty}"
         )
         return True
 
@@ -1409,6 +1489,7 @@ class InnovestXTradingBot:
             logger.error(f"🛑 CIRCUIT BREAKER ทำงาน: {halt_reason} — หยุดเปิดออเดอร์ซื้อใหม่ "
                          f"(โพซิชันที่ถืออยู่ยังถูกดูแลต่อ จนกว่าจะขาย) "
                          f"ปลดล็อกอัตโนมัติวันถัดไป หรือกดปลดล็อกจากหน้าเว็บ")
+            notify_telegram(f"Sentinel หยุดเปิดไม้ใหม่\n{halt_reason}")
         save_shared_risk(risk)
         self.save_state()
 
@@ -1492,6 +1573,9 @@ class InnovestXTradingBot:
         จะเหลือเงินไม่พอให้เหรียญอื่นซื้อในรอบเดียวกันแทบทุกครั้ง)
         """
         if self.state["status"] != "IDLE":
+            return False
+        if is_watch_paused(self.symbol):
+            logger.info(f"[{self.symbol}] หยุดเฝ้าอยู่ — ไม่เปิดไม้ซื้อ (กดเฝ้าต่อที่หน้าเว็บถ้าต้องการ)")
             return False
 
         if self._has_unresolved_order():
@@ -1588,7 +1672,7 @@ class InnovestXTradingBot:
 
             if sell_mark <= stop_loss_threshold:
                 logger.warning("🚨 ถึงจุด Hard Stop Loss ขายทันทีเพื่อจำกัดความเสียหาย")
-                self.sell_position(qty, sell_mark)
+                self.sell_position(qty, sell_mark, reason="stop_loss")
             elif has_peaked and sell_mark <= trailing_threshold:
                 # ขายทันทีที่ราคาย่อลงมาเกิน trailing_stop_percent จากจุดสูงสุด ไม่รอเช็ค breakeven อีกต่อไป
                 # (ของเดิมจะถือต่อถ้ายังไม่คุ้มค่าธรรมเนียม ทำให้บางครั้งไม่ขายเลย)
@@ -1598,9 +1682,9 @@ class InnovestXTradingBot:
                 else:
                     logger.warning(f"⚠️ ถึงจุด Trailing Stop ({self.trailing_stop_percent}%) แต่ยังไม่คุ้มค่าธรรมเนียม "
                                    f"(breakeven {breakeven_price:.2f}) — ขายตามคำสั่งใหม่ (ไม่ถือรอแล้ว)")
-                self.sell_position(qty, sell_mark)
+                self.sell_position(qty, sell_mark, reason="trailing")
 
-    def sell_position(self, qty, current_price=None):
+    def sell_position(self, qty, current_price=None, reason=""):
         _, coin_free, has_pending = self.get_free_balance()
         if has_pending:
             logger.info("ข้ามการขาย: มีออเดอร์ค้างอยู่ในระบบ")
@@ -1670,9 +1754,28 @@ class InnovestXTradingBot:
 
         self.state.update({
             "status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0,
-            "pending_order": None,
+            "pending_order": None, "entry_price_estimated": False,
         })
         self._register_trade_result(pnl_thb)
+        self._after_successful_sell(pnl_thb, reason)
+
+    def _after_successful_sell(self, pnl_thb, reason=""):
+        name = _display_symbol(self.symbol)
+        pnl_txt = f"{pnl_thb:+.2f} ฿"
+        if reason == "stop_loss":
+            set_watch_paused(self.symbol, True, reason="stop_loss")
+            logger.warning(
+                f"[{self.symbol}] ตัดขาดทุนแล้ว — หยุดเฝ้า ไม่ซื้อคืนจนกว่าจะกดเฝ้าต่อที่หน้าเว็บ"
+            )
+            notify_telegram(
+                f"Sentinel ตัดขาดทุน {name} {pnl_txt}\n"
+                f"หยุดเฝ้าแล้ว จะไม่ซื้อคืน จนกว่าคุณจะกดเฝ้าต่อที่หน้าเว็บ"
+            )
+            return
+        if reason == "trailing":
+            notify_telegram(f"Sentinel ขาย {name} (trailing) {pnl_txt}")
+            return
+        notify_telegram(f"Sentinel ขาย {name} {pnl_txt}")
 
     def resume_from_halt(self):
         """ปลด HALTED — ถ้ายังมีของค้าง ให้ถือเป็น HOLDING ด้วยราคาประมาณ แล้วขายได้ทันที"""
@@ -1819,6 +1922,7 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .coin-list { display:flex; flex-direction:column; gap:10px; padding:16px 20px 0; }
   .coin-card { background:var(--card); border:1px solid var(--border); border-radius:16px; padding:14px 16px; }
   .coin-card.is-holding { border-color:#3A5344; }
+  .coin-card.is-paused { border-color:#5A4A28; }
   .coin-head { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
   .coin-sym { font-size:15px; font-weight:700; letter-spacing:0.02em; }
   .coin-price { font-size:15px; font-weight:700; font-variant-numeric:tabular-nums; }
@@ -1828,6 +1932,8 @@ DASHBOARD_TEMPLATE = Template("""<!DOCTYPE html>
   .chip.down { background:var(--red-soft); color:var(--red); }
   .chip.hold { background:var(--green-soft); color:var(--green); }
   .coin-sub { margin-top:8px; font-size:12px; color:var(--text-soft); line-height:1.45; }
+  .coin-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:10px; }
+  .coin-actions .password-input { flex:1; min-width:90px; margin:0; padding:8px 10px; font-size:12px; }
 
   .control { margin:28px 20px 0; }
   .control-heading { display:flex; align-items:baseline; justify-content:space-between;
@@ -2231,6 +2337,15 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             f"ถ้าค้างนานผิดปกติค่อยกดปลดล็อกด้านล่าง</div>"
         )
 
+    paused_symbols = [s for s in (control.get("paused_symbols") or []) if s in display_symbols]
+    pause_reasons = dict(control.get("pause_reasons") or {})
+    if paused_symbols:
+        names = ", ".join(_display_symbol(s) for s in paused_symbols)
+        banners.append(
+            f'<div class="banner banner-warning">หยุดเฝ้า: {names} '
+            f"— บอทไม่ซื้อคืนเหรียญเหล่านี้ จนกว่าคุณจะกดเฝ้าต่อที่การ์ดเหรียญ</div>"
+        )
+
     if control.get("paused"):
         banners.append(
             '<div class="banner banner-info">บอทหยุดเทรดชั่วคราว (สั่งจากหน้านี้) '
@@ -2296,11 +2411,22 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
     ]
     cards_html = "".join(cards)
 
+    password_field_html = ""
+    password_field_inline = ""
+    if os.environ.get("DASHBOARD_PASSWORD"):
+        password_field_html = (
+            '<input class="password-input" type="password" name="password" placeholder="รหัส" style="margin-top:8px;">'
+        )
+        password_field_inline = (
+            '<input class="password-input" type="password" name="password" placeholder="รหัส">'
+        )
+
     coin_parts = ['<div class="coin-list">']
     if not display_symbols:
         coin_parts.append(
             '<div class="coin-card"><div class="coin-sub">ยังไม่มีเหรียญในรายการ — เพิ่มด้านล่างได้เลย</div></div>'
         )
+    paused_set = set(paused_symbols)
     for sym in display_symbols:
         st = states_by_symbol.get(sym) or {}
         status = st.get("status", "IDLE")
@@ -2312,11 +2438,19 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         change_2h = trend.get("change_2h")
         net_2h = trend.get("net_2h")
         elapsed = trend.get("elapsed") or 0.0
+        is_paused = sym in paused_set
         holding_cls = " is-holding" if status == "HOLDING" else ""
+        if is_paused:
+            holding_cls += " is-paused"
         price_txt = f"{_fmt_thb(current)} ฿" if current is not None else "—"
         chips = []
         if sym in pending_remove:
             chips.append('<span class="chip down">รอขายก่อนเอาออก</span>')
+        if is_paused:
+            if pause_reasons.get(sym) == "stop_loss":
+                chips.append('<span class="chip down">ตัดขาดทุน — หยุดเฝ้า</span>')
+            else:
+                chips.append('<span class="chip down">หยุดเฝ้า</span>')
         if status == "HOLDING":
             chips.append('<span class="chip hold">ถืออยู่</span>')
             if st.get("entry_price_estimated"):
@@ -2327,9 +2461,9 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
                 chips.append(f'<span class="chip {"up" if d >= 0 else "down"}">{d:+.2f}% จากต้นทุน</span>')
         elif status == "HALTED":
             chips.append('<span class="chip down">HALTED — รอราคาตลาด บอทจะถือต่อเอง</span>')
-        else:
+        elif not is_paused:
             chips.append('<span class="chip" >เฝ้าอยู่</span>')
-        if trend.get("should_buy") and status != "HOLDING":
+        if trend.get("should_buy") and status != "HOLDING" and not is_paused:
             chips.append('<span class="chip up">พร้อมซื้อ</span>')
         elif trend.get("vetoed"):
             chips.append('<span class="chip down">ชม.3 ห้ามซื้อ</span>')
@@ -2353,7 +2487,11 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             chips.append(
                 f'<span class="chip {"down" if spread > MAX_SPREAD_PERCENT else ""}">สเปรด {spread:.2f}%</span>'
             )
-        if status == "HOLDING":
+        if is_paused and pause_reasons.get(sym) == "stop_loss":
+            sub = "ตัดขาดทุนแล้ว — บอทไม่ซื้อคืน จนกว่าคุณจะกดเฝ้าต่อ"
+        elif is_paused:
+            sub = "หยุดเฝ้าอยู่ — บอทไม่เปิดไม้ซื้อ จนกว่าคุณจะกดเฝ้าต่อ"
+        elif status == "HOLDING":
             entry_txt = _fmt_thb(float(st.get("entry_price", 0) or 0))
             if st.get("entry_price_estimated"):
                 sub = f"ต้นทุนประมาณ {entry_txt} ฿ (ยืนยันจับคู่ไม่ได้) · ดูแลด้วย trailing / stop loss แบบเดิม"
@@ -2371,29 +2509,36 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
                 sub = reason_th
             else:
                 sub = f"เกณฑ์: ชม.1 ≥ {MIN_CHANGE_1H_PERCENT}% และชม.2 ขึ้น, สุทธิ 2 ชม. ≥ {MIN_NET_2H_PERCENT}%"
+        if is_paused:
+            watch_btn = '<button type="submit" name="action" value="resume" class="btn btn-sm btn-accent">เฝ้าต่อ</button>'
+        else:
+            watch_btn = '<button type="submit" name="action" value="pause" class="btn btn-sm btn-neutral">หยุดเฝ้า</button>'
         coin_parts.append(
             f'<article class="coin-card{holding_cls}">'
             f'<div class="coin-head"><div class="coin-sym">{_display_symbol(sym)}</div>'
             f'<div class="coin-price">{price_txt}</div></div>'
             f'<div class="coin-meta">{"".join(chips)}</div>'
             f'<div class="coin-sub">{sub}</div>'
+            f'<form class="coin-actions" method="POST" action="/control/coin-watch">'
+            f'<input type="hidden" name="symbol" value="{sym}">'
+            f'{password_field_inline}{watch_btn}'
+            f'</form>'
             "</article>"
         )
     coin_parts.append("</div>")
     coin_cards_html = "".join(coin_parts)
-
-    password_field_html = ""
-    if os.environ.get("DASHBOARD_PASSWORD"):
-        password_field_html = (
-            '<input class="password-input" type="password" name="password" placeholder="รหัส" style="margin-top:8px;">'
-        )
 
     watch_rows = ['<div class="watch-list">']
     for sym in watchlist:
         st = states_by_symbol.get(sym) or {}
         status = st.get("status", "IDLE")
         holding = status == "HOLDING"
-        meta = "ถืออยู่ — ติ๊กเอาออกได้ บอทจะรอขายก่อนแล้วค่อยเลิกเฝ้า" if holding else "เฝ้าอยู่ รอสัญญาณขาขึ้น"
+        if sym in paused_set:
+            meta = "หยุดเฝ้าอยู่ — กดเฝ้าต่อที่การ์ดด้านบนถ้าต้องการให้บอทซื้อคืน"
+        elif holding:
+            meta = "ถืออยู่ — ติ๊กเอาออกได้ บอทจะรอขายก่อนแล้วค่อยเลิกเฝ้า"
+        else:
+            meta = "เฝ้าอยู่ รอสัญญาณขาขึ้น"
         watch_rows.append(
             '<label class="watch-row">'
             f'<div class="watch-row-main"><div class="watch-sym">{_display_symbol(sym)}</div>'
@@ -2640,6 +2785,26 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 save_control(control)
                 logger.info("[เว็บควบคุม] ได้รับคำขอปลดล็อกบอท — จะมีผลในรอบ loop ถัดไป")
 
+            elif self.path == "/control/coin-watch":
+                control = load_control()
+                symbol = _normalize_symbol(fields.get("symbol", [""])[0])
+                action = (fields.get("action", [""])[0] or "").strip().lower()
+                watchlist = list(control.get("watchlist") or [])
+                if not looks_like_pair(symbol) or symbol not in watchlist:
+                    logger.warning(f"[เว็บควบคุม] ปฏิเสธหยุด/เฝ้าต่อ: เหรียญไม่ได้อยู่ในรายการ ({symbol})")
+                elif action == "pause":
+                    control = apply_watch_pause(control, symbol, True, reason="user")
+                    save_control(control)
+                    logger.info(f"[เว็บควบคุม] หยุดเฝ้า {symbol} — จะไม่เปิดไม้ซื้อจนกว่าจะกดเฝ้าต่อ")
+                    notify_telegram(f"Sentinel หยุดเฝ้า {_display_symbol(symbol)} ตามคำสั่งจากหน้าเว็บ")
+                elif action == "resume":
+                    control = apply_watch_pause(control, symbol, False)
+                    save_control(control)
+                    logger.info(f"[เว็บควบคุม] เฝ้าต่อ {symbol}")
+                    notify_telegram(f"Sentinel เฝ้าต่อ {_display_symbol(symbol)} — พร้อมซื้อเมื่อเข้าเกณฑ์")
+                else:
+                    logger.warning(f"[เว็บควบคุม] ไม่รู้จักคำสั่งเฝ้าเหรียญ: {action}")
+
             self.send_response(303)
             self.send_header("Location", "/")
             self.end_headers()
@@ -2885,6 +3050,12 @@ if __name__ == "__main__":
                         logger.exception(f"[{bot.symbol}] วิเคราะห์เทรนด์ล้มเหลว")
                         continue
                     if signal.get("should_buy"):
+                        if is_watch_paused(bot.symbol, control):
+                            logger.info(
+                                f"[{bot.symbol}] สัญญาณขาขึ้นแต่หยุดเฝ้าอยู่ — ไม่ซื้อ "
+                                f"(กดเฝ้าต่อที่หน้าเว็บถ้าต้องการ)"
+                            )
+                            continue
                         candidates.append((bot, px, signal))
 
                 candidates.sort(
