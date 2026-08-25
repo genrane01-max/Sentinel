@@ -1704,15 +1704,24 @@ class InnovestXTradingBot:
         return True
 
     def _finalize_buy(self, order_id=None, expected_buy=None, buy_value=None):
-        """จบขั้นตอนซื้อด้วยของจริงในพอร์ต — ไม่เดาจำนวน ถ้าไม่รู้ fill จะถือต่อด้วยราคาประมาณทันที"""
+        """
+        จบขั้นตอนซื้อด้วยของจริงในพอร์ต
+        ถ้า order_id ไม่มี จะพยายามดึงจาก pending_order
+        """
+        # ถ้าไม่ได้รับ order_id ให้ลองดึงจาก pending
+        if not order_id:
+            pending = self.state.get("pending_order") or {}
+            order_id = pending.get("order_id")
+    
         dust = self._dust_threshold()
         avg_price = 0.0
+    
         if order_id:
             avg_price = self.confirm_fill_price(order_id) or 0.0
-
+    
         _, coin_free, still_pending = self._wait_for_coin_balance(dust)
         rules = self.get_symbol_rules()
-
+    
         if float(coin_free or 0) > dust:
             qty = self._floor_to_increment(coin_free, rules["quantity_increment"])
             if avg_price > 0:
@@ -1726,19 +1735,15 @@ class InnovestXTradingBot:
                     + f", ค่าธรรมเนียม round-trip โดยประมาณ {fee_pct:.3f}%"
                 )
                 return True
-            logger.warning(
-                f"[{self.symbol}] มีเหรียญเข้าพอร์ต {qty} แต่ยืนยันราคาจับคู่ไม่ได้ "
-                f"— จะถือต่อด้วยต้นทุนประมาณทันที ไม่รอปลดจากเว็บ"
-            )
+    
+            # มีเหรียญแต่ยังไม่รู้ราคาจริง → ถือต่อด้วยราคาประมาณ
+            logger.warning(f"[{self.symbol}] มีเหรียญเข้าพอร์ต {qty} แต่ยืนยันราคาจับคู่ไม่ได้ --- จะถือต่อด้วยต้นทุนประมาณทันที ไม่รอปลดจากเว็บ")
             return self._adopt_unknown_buy_cost(qty, expected_buy)
-
+    
         if still_pending:
-            logger.warning(
-                f"[{self.symbol}] ออเดอร์ยัง matching และยังไม่มีเหรียญในพอร์ต "
-                f"— คง pending ไว้ ไม่ยิงซ้ำ"
-            )
+            logger.warning(f"[{self.symbol}] ออเดอร์ยัง matching และยังไม่มีเหรียญในพอร์ต --- คง pending ไว้ ไม่ยิงซ้ำ")
             return False
-
+    
         self.state["pending_order"] = None
         self.save_state()
         logger.warning(f"[{self.symbol}] ซื้อไม่สำเร็จ: ไม่มีเหรียญเข้าพอร์ต")
