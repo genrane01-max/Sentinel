@@ -566,7 +566,21 @@ def parse_order_timestamp(order):
         except (TypeError, ValueError):
             continue
     return None
-
+    
+    
+def normalize_order_side(value):
+    """
+    แปลง side ของ InnovestX ให้เป็น:
+    0 = Buy
+    1 = Sell
+    รองรับทั้งตัวเลขและข้อความ
+    """
+    if value in (0, "0", "Buy", "BUY", "buy"):
+        return 0
+    if value in (1, "1", "Sell", "SELL", "sell"):
+        return 1
+    return None
+    
 
 def order_is_recent_match(order, symbol, side, since_ts, allow_open_without_time=False):
     """จับออเดอร์ของเหรียญ/ฝั่งเดียวกันที่เกิดหลัง since_ts — กันไปเจอไม้เก่า"""
