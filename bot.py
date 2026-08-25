@@ -1567,37 +1567,53 @@ class InnovestXTradingBot:
         if side == 0 and value is not None and value < self.MIN_ORDER_THB:
             logger.warning(f"ยกเลิกคำสั่งซื้อ: มูลค่า {value} THB ต่ำกว่าขั้นต่ำ {self.MIN_ORDER_THB} THB")
             return None
-
+    
         if self._has_unresolved_order():
             pending_side = (self.state.get("pending_order") or {}).get("side", side)
-            logger.warning(
-                f"[{self.symbol}] มีคำสั่งที่ timeout ค้างอยู่ — ไม่ยิงซ้ำ กำลังตรวจสถานะในระบบ"
-            )
+            logger.warning(f"[{self.symbol}] มีคำสั่งที่ timeout ค้างอยู่ --- ไม่ยิงซ้ำ กำลังตรวจสถานะในระบบ")
             return self._recover_order_after_timeout(pending_side)
-
+    
         path = ORDER_SEND_PATH
         body = {"symbol": self.symbol, "timeInForce": 1, "side": side, "orderType": 1}
         if side == 0 and value is not None:
             body["value"] = round(value, 2)
         elif side == 1 and quantity is not None:
             body["quantity"] = quantity
-
+    
         logger.info(f"กำลังส่งคำสั่งเทรด: {'ซื้อ' if side == 0 else 'ขาย'} -> {body}")
         res = self.send_request("POST", path, body=body)
-
+    
+        # ถ้า timeout หรือ indeterminate → เก็บ pending แล้วหา recovery
         if res and res.get("code") == "TIMEOUT_INDETERMINATE":
             self.state["pending_order"] = {
                 "side": side,
                 "value": value,
                 "quantity": quantity,
                 "ts": time.time(),
+                # ไม่มี order_id เพราะ timeout ยังไม่รู้
             }
             self.save_state()
             recovered = self._recover_order_after_timeout(side)
             return recovered
-
+    
+        # ถ้าสำเร็จ ให้เก็บ orderId ทันที
         if res and res.get("code") == "0000":
-            self.state["pending_order"] = None
+            order_id = (res.get("data") or {}).get("orderId")
+            if order_id:
+                self.state["pending_order"] = {
+                    "side": side,
+                    "value": value,
+                    "quantity": quantity,
+                    "ts": time.time(),
+                    "order_id": order_id,   # เก็บ orderId ไว้ใช้ตอนกู้คืน
+                }
+                self.save_state()
+            else:
+                self.state["pending_order"] = None
+            return res
+    
+        # กรณีอื่น ๆ ที่ไม่สำเร็จ
+        self.state["pending_order"] = None
         return res
 
     def _wait_for_coin_balance(self, dust_threshold, max_attempts=6, delay_sec=1.0):
