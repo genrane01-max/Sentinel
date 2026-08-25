@@ -1515,43 +1515,52 @@ class InnovestXTradingBot:
         return ts
 
     def _recover_order_after_timeout(self, side, max_attempts=5, delay_sec=1.5):
-        """หลัง timeout ตอนส่งคำสั่ง: หาออเดอร์ล่าสุดในระบบแทนการยิงซ้ำ — ไม่จับไม้เก่า"""
+        """
+        หลัง timeout: หาออเดอร์ล่าสุดในระบบ (ใช้ orderId ที่เก็บไว้ ถ้ามี)
+        ห้ามยิงซ้ำ
+        """
+        pending = self.state.get("pending_order") or {}
+        pending_order_id = pending.get("order_id")
+    
+        # ถ้ามี pending_order_id ให้ค้นหาตามนั้นก่อน
+        if pending_order_id:
+            for attempt in range(1, max_attempts + 1):
+                hist_res = self.send_request(
+                    "POST", "/api/v1/digital-asset/order/history/inquiry",
+                    body={"symbol": self.symbol, "orderId": pending_order_id}
+                )
+                if hist_res and hist_res.get("code") == "0000":
+                    orders = hist_res.get("data") or []
+                    if orders:
+                        order = orders[0]
+                        logger.info(f"[{self.symbol}] พบออเดอร์ตาม orderId {pending_order_id}")
+                        return {"code": "0000", "data": order}
+                time.sleep(delay_sec)
+    
+        # ถ้าไม่มี orderId หรือหาไม่เจอ ให้ค้นหาจาก Open Orders / History ทั่วไป
         since_ts = self._pending_since_ts()
         for attempt in range(1, max_attempts + 1):
             open_res = self.send_request("GET", "/api/v1/digital-asset/order/open/inquiry")
             if open_res and open_res.get("code") == "0000":
                 for order in open_res.get("data") or []:
-                    if order_is_recent_match(
-                        order, self.symbol, side, since_ts, allow_open_without_time=True
-                    ):
-                        logger.info(
-                            f"[{self.symbol}] พบออเดอร์ค้างในระบบหลัง timeout: {order.get('orderId')}"
-                        )
+                    if order_is_recent_match(order, self.symbol, side, since_ts, allow_open_without_time=True):
+                        logger.info(f"[{self.symbol}] พบออเดอร์ค้างในระบบหลัง timeout: {order.get('orderId')}")
                         return {"code": "0000", "data": order}
-
+    
             hist_res = self.send_request(
                 "POST", "/api/v1/digital-asset/order/history/inquiry",
-                body={"symbol": self.symbol},
+                body={"symbol": self.symbol}
             )
             if hist_res and hist_res.get("code") == "0000":
                 for order in hist_res.get("data") or []:
-                    if order_is_recent_match(
-                        order, self.symbol, side, since_ts, allow_open_without_time=False
-                    ):
-                        logger.info(
-                            f"[{self.symbol}] พบออเดอร์ล่าสุดในประวัติหลัง timeout: {order.get('orderId')}"
-                        )
+                    if order_is_recent_match(order, self.symbol, side, since_ts, allow_open_without_time=False):
+                        logger.info(f"[{self.symbol}] พบออเดอร์ล่าสุดในประวัติหลัง timeout: {order.get('orderId')}")
                         return {"code": "0000", "data": order}
-
-            logger.info(
-                f"[{self.symbol}] ยังไม่เจอออเดอร์ล่าสุดหลัง timeout (ครั้งที่ {attempt}/{max_attempts})"
-            )
+    
+            logger.info(f"[{self.symbol}] ยังไม่เจอออเดอร์ล่าสุดหลัง timeout (ครั้งที่ {attempt}/{max_attempts})")
             time.sleep(delay_sec)
-
-        logger.error(
-            f"[{self.symbol}] timeout แล้วยังไม่เจอออเดอร์ล่าสุดในระบบ — จะไม่ยิงซ้ำ "
-            f"(จะเช็คยอดเหรียญในพอร์ตก่อนตัดสิน)"
-        )
+    
+        logger.error(f"[{self.symbol}] timeout แล้วยังไม่เจอออเดอร์ล่าสุดในระบบ --- จะไม่ยิงซ้ำ (จะเช็คยอดเหรียญในพอร์ตก่อนตัดสิน)")
         return None
 
     def execute_market_order(self, side, value=None, quantity=None):
