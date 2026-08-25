@@ -600,23 +600,30 @@ def normalize_order_side(value):
     
 
 def order_is_recent_match(order, symbol, side, since_ts, allow_open_without_time=False):
-    """จับออเดอร์ของเหรียญ/ฝั่งเดียวกันที่เกิดหลัง since_ts — กันไปเจอไม้เก่า"""
+    """
+    ตรวจสอบว่าออเดอร์นี้ตรงกับเหรียญ/ฝั่ง และเกิดขึ้นหลัง since_ts หรือไม่
+    ใช้ normalize_order_side เพื่อแปลง side ให้เป็น 0/1
+    """
     if not isinstance(order, dict):
         return False
+
     order_symbol = str(order.get("symbol") or "").upper()
     if order_symbol and order_symbol != str(symbol or "").upper():
         return False
-    try:
-        if int(order.get("side", -1)) != int(side):
-            return False
-    except (TypeError, ValueError):
+
+    order_side = normalize_order_side(order.get("side"))
+    if order_side is None:
         return False
+    if order_side != int(side):
+        return False
+
     ts = parse_order_timestamp(order)
     if ts is None:
         if not allow_open_without_time:
             return False
         state = str(order.get("orderState") or order.get("status") or "").lower()
         return state in ("working", "new", "open", "pending", "partial", "partiallyfilled", "")
+
     return ts >= (float(since_ts) - 5.0)
 
 
