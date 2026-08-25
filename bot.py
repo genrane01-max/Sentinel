@@ -539,13 +539,28 @@ def net_pnl_thb(entry_price, sell_price, qty, roundtrip_fee_percent):
 
 
 def parse_order_timestamp(order):
-    """แปลงเวลาสร้างออเดอร์เป็น epoch วินาที — รองรับ ms / วินาที / ISO"""
+    """
+    แปลงเวลาสร้างออเดอร์เป็น epoch วินาที
+    รองรับ receiveDateTime, transactTime, ฯลฯ
+    """
     if not isinstance(order, dict):
         return None
-    for key in (
-        "transactTime", "createdTime", "createTime", "createdAt",
-        "timestamp", "time", "orderTime", "updatedTime", "updateTime",
-    ):
+
+    # ลำดับความสำคัญ: receiveDateTime มาก่อน
+    time_fields = [
+        "receiveDateTime",
+        "transactTime",
+        "createdTime",
+        "createTime",
+        "createdAt",
+        "timestamp",
+        "time",
+        "orderTime",
+        "updatedTime",
+        "updateTime",
+    ]
+
+    for key in time_fields:
         raw = order.get(key)
         if raw is None or raw == "":
             continue
@@ -557,6 +572,7 @@ def parse_order_timestamp(order):
                 return val
         except (TypeError, ValueError):
             pass
+
         try:
             text = str(raw).strip().replace("Z", "+00:00")
             dt = datetime.fromisoformat(text)
@@ -565,6 +581,7 @@ def parse_order_timestamp(order):
             return dt.timestamp()
         except (TypeError, ValueError):
             continue
+
     return None
     
     
