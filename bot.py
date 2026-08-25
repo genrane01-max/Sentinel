@@ -204,6 +204,13 @@ HOUR3_VETO_PERCENT = -1.5        # ชม.3 ลงแรงกว่านี้
 # ซื้อเมื่อ confidence >= MIN_CONFIDENCE_TO_BUY และไม่โดน veto (ไล่หัว / ชม.3 ลงแรง)
 MIN_CONFIDENCE_TO_BUY = 80
 MAX_SPREAD_PERCENT = 0.5         # ไม่ซื้อถ้า (ask-bid)/mid กว้างเกินนี้ (%)
+GRADUAL_WINDOW_MINUTES = 60          # ดูย้อนหลังกี่นาทีเพื่อหาจังหวะขยับทีละนิดก่อนพุ่ง
+GRADUAL_BUCKET_MINUTES = 10          # แบ่งหน้าต่างเป็นช่วงละกี่นาที (60/10 = 6 ช่วง)
+GRADUAL_MIN_BUCKET_PERCENT = 0.03    # นับเป็น "ขยับขึ้น" ถ้าช่วงนั้นขึ้นอย่างน้อยเท่านี้
+GRADUAL_MAX_BUCKET_PERCENT = 0.5     # ช่วงไหนขึ้น/ลงแรงเกินนี้ = ไม่ใช่ขยับทีละนิดแล้ว
+GRADUAL_MIN_POSITIVE_RATIO = 0.8     # ต้องมีช่วงที่ขึ้นอย่างน้อยเท่านี้ % ของทั้งหมด
+GRADUAL_MIN_TOTAL_PERCENT = 0.6      # ← ปรับจาก 0.35 เป็น 0.6 (สูงกว่าค่าฟี 0.4% พอสมควร)
+GRADUAL_MAX_TOTAL_PERCENT = 2.5      # รวมทั้งหน้าต่างขึ้นเกินนี้ = สายไปแล้ว
 ORDER_SEND_PATH = "/api/v1/digital-asset/order/send"
 PENDING_ORDER_TTL_SEC = 600  # ล็อกกันยิงซ้ำอย่างน้อย 10 นาที — ห้ามปลดแค่เพราะหมดเวลาถ้ายังไม่เช็คพอร์ต
 RECENT_ORDER_LOOKBACK_SEC = 180
@@ -254,35 +261,93 @@ def _first_book_price(levels):
     return None
 
 
-def parse_market_quote(payload):
-    """แยก last / bid / offer จาก orderbook หรือ ticker — ไม่ยุบเป็นราคาเดียว"""
-    quote = {"last": None, "bid": None, "ask": None, "mid": None, "spread_pct": None}
-    if not isinstance(payload, dict) or payload.get("code") != "0000":
-        return quote
-    data = payload.get("data")
-    record = None
-    if isinstance(data, dict):
-        record = data
-    elif isinstance(data, list) and data:
-        record = data[0] if isinstance(data[0], dict) else None
-    if not isinstance(record, dict):
-        return quote
-    for key in ("lastTradePrice", "last", "close", "lastPrice", "price"):
-        val = _safe_float(record.get(key))
-        if val is not None and val > 0:
-            quote["last"] = val
-            break
-    bids = record.get("bids") or record.get("bid") or []
-    asks = record.get("asks") or record.get("ask") or []
-    quote["bid"] = _first_book_price(bids)
-    quote["ask"] = _first_book_price(asks)
-    if quote["bid"] and quote["ask"]:
-        quote["mid"] = (quote["bid"] + quote["ask"]) / 2.0
-        if quote["mid"] > 0:
-            quote["spread_pct"] = (quote["ask"] - quote["bid"]) / quote["mid"] * 100
-    elif quote["bid"] or quote["ask"]:
-        quote["mid"] = quote["bid"] or quote["ask"]
-    return quote
+def parse_market_quote(data):
+    """
+    แปลงข้อมูลตลาดจาก InnovestX ให้เป็น:
+    bid = ราคาซื้อสูงสุดใน Order Book
+    ask = ราคาขายต่ำสุดใน Order Book
+    last = ราคาซื้อขายล่าสุด
+
+    InnovestX Level 2:
+      side=0 -> Buy / Bid
+      side=1 -> Sell / Ask
+    """
+
+    result = {
+        "bid": None,
+        "ask": None,
+        "last": None,
+        "spread": None,
+    }
+
+    if not isinstance(data, dict):
+        return result
+
+    # --------------------------------------------------
+    # 1) ดึง data
+    # --------------------------------------------------
+    rows = data.get("data")
+
+    if isinstance(rows, dict):
+        rows = [rows]
+
+    if not isinstance(rows, list):
+        rows = []
+
+    # --------------------------------------------------
+    # 2) อ่าน Level 2 Order Book
+    # --------------------------------------------------
+    bids = []
+    asks = []
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        try:
+            price = float(row.get("price"))
+        except (TypeError, ValueError):
+            continue
+
+        side = row.get("side")
+
+        # InnovestX บาง response อาจเป็นตัวเลข
+        if side in (0, "0", "Buy", "BUY", "buy"):
+            bids.append(price)
+
+        elif side in (1, "1", "Sell", "SELL", "sell"):
+            asks.append(price)
+
+    # Bid = ราคาซื้อสูงสุด
+    if bids:
+        result["bid"] = max(bids)
+
+    # Ask = ราคาขายต่ำสุด
+    if asks:
+        result["ask"] = min(asks)
+
+    # --------------------------------------------------
+    # 3) lastTradePrice
+    # --------------------------------------------------
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        try:
+            last = float(row.get("lastTradePrice"))
+            if last > 0:
+                result["last"] = last
+                break
+        except (TypeError, ValueError):
+            pass
+
+    # --------------------------------------------------
+    # 4) คำนวณ Spread
+    # --------------------------------------------------
+    if result["bid"] is not None and result["ask"] is not None:
+        result["spread"] = result["ask"] - result["bid"]
+
+    return result
 
 
 def parse_market_price(payload):
@@ -384,7 +449,80 @@ def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ag
     result["should_buy"] = confidence >= MIN_CONFIDENCE_TO_BUY
     result["reason"] = None if result["should_buy"] else (reason or "weak")
     return result
+    
+def detect_gradual_climb(history, now=None, window_minutes=GRADUAL_WINDOW_MINUTES,
+                          bucket_minutes=GRADUAL_BUCKET_MINUTES):
+    """หาจังหวะราคาขยับขึ้นทีละนิดต่อเนื่อง (สะสมก่อนพุ่ง) แทนการรอยืนยันหลังขึ้นแรงไปแล้ว
 
+    แบ่งช่วงย้อนหลัง window_minutes เป็นบักเก็ตละ bucket_minutes นาที แล้วเช็คว่า:
+      - ไม่มีบักเก็ตไหนขึ้น/ลงแรงเกิน GRADUAL_MAX_BUCKET_PERCENT (ไม่ใช่พุ่ง/ร่วงพรวดเดียว)
+      - สัดส่วนบักเก็ตที่ "ขึ้น" (>= GRADUAL_MIN_BUCKET_PERCENT) มากพอ (กันสัญญาณหลอก)
+      - รวมทั้งหน้าต่างอยู่ในช่วง [GRADUAL_MIN_TOTAL_PERCENT, GRADUAL_MAX_TOTAL_PERCENT]
+        (ขยับจริง แต่ยังไม่สายเกินไป)
+    """
+    result = {"is_gradual": False, "reason": "no_data", "total_change": None, "buckets": []}
+    now = time.time() if now is None else now
+    history = trim_to_continuous_recent(history or [], now)
+    if not history:
+        return result
+
+    window_sec = window_minutes * 60
+    bucket_sec = bucket_minutes * 60
+    n_buckets = int(window_minutes // bucket_minutes)
+    if n_buckets < 2:
+        return result
+
+    if now - history[0][0] < window_sec:
+        result["reason"] = "waiting_history"
+        return result
+
+    def price_at(seconds_ago, tolerance=180):
+        target = now - seconds_ago
+        closest = min(history, key=lambda t: abs(t[0] - target))
+        if abs(closest[0] - target) > tolerance:
+            return None
+        return closest[1]
+
+    marks = []
+    for i in range(n_buckets + 1):
+        px = price_at(window_sec - i * bucket_sec)
+        if px is None:
+            result["reason"] = "gap"
+            return result
+        marks.append(px)
+
+    buckets = []
+    climbing = 0
+    for i in range(n_buckets):
+        pct = _pct_change(marks[i + 1], marks[i])
+        if pct is None:
+            result["reason"] = "gap"
+            return result
+        if abs(pct) > GRADUAL_MAX_BUCKET_PERCENT:
+            result["reason"] = "spike_bucket" if pct > 0 else "drop_bucket"
+            result["buckets"] = buckets + [pct]
+            return result
+        buckets.append(pct)
+        if pct >= GRADUAL_MIN_BUCKET_PERCENT:
+            climbing += 1
+
+    result["buckets"] = buckets
+    total_change = _pct_change(marks[-1], marks[0])
+    result["total_change"] = total_change
+
+    if climbing / n_buckets < GRADUAL_MIN_POSITIVE_RATIO:
+        result["reason"] = "uneven"
+        return result
+    if total_change is None or total_change < GRADUAL_MIN_TOTAL_PERCENT:
+        result["reason"] = "too_flat"
+        return result
+    if total_change > GRADUAL_MAX_TOTAL_PERCENT:
+        result["reason"] = "too_late"
+        return result
+
+    result["is_gradual"] = True
+    result["reason"] = None
+    return result
 
 def net_pnl_thb(entry_price, sell_price, qty, roundtrip_fee_percent):
     """กำไร/ขาดทุนสุทธิหลังหักค่าธรรมเนียมไป-กลับ (ซื้อขาหนึ่ง + ขายขาหนึ่ง)"""
@@ -685,6 +823,12 @@ REASON_TH = {
     "weak": "คะแนนยังไม่ถึงเกณฑ์",
     "waiting_history": "รอสะสมข้อมูล 2 ชั่วโมง",
     "unknown": "ยังประเมินไม่ได้",
+    "spike_bucket": "มีบางช่วงพุ่งแรงเกินไป — ไม่ใช่ขยับทีละนิดแล้ว",
+        "drop_bucket": "มีบางช่วงร่วงแรง — จังหวะยังไม่นิ่งพอ",
+        "uneven": "ขึ้นไม่สม่ำเสมอพอที่จะเรียกว่าขยับทีละนิด",
+        "too_flat": "ยังขยับน้อยเกินไป รอสัญญาณชัดกว่านี้",
+        "too_late": f"ขึ้นมาเกิน {GRADUAL_MAX_TOTAL_PERCENT}% ในชั่วโมงที่ผ่านมาแล้ว — สายเกินจังหวะขยับทีละนิด",
+        "no_data": "ข้อมูลไม่พอสำหรับเช็คจังหวะขยับทีละนิด",
 }
 
 
@@ -1656,81 +1800,82 @@ class InnovestXTradingBot:
 
     # ==================== Strategy ====================
     def analyze_trend(self, current_price):
-        """ประเมินขาขึ้น/ลงด้วย Price Action 2H — ชม.3 ใช้แค่ห้ามซื้อ"""
-        empty = {
-            "ready": False,
-            "should_buy": False,
-            "direction": None,
-            "confidence": 0,
-            "change_1h": 0.0,
-            "change_2h": None,
-            "change_3h": None,
-            "net_2h": None,
-            "vetoed": False,
-            "reason": "unknown",
-            "elapsed": 0.0,
-        }
-        if current_price is None:
-            empty["reason"] = "no_price"
-            return empty
-
-        empty["elapsed"] = history_elapsed_sec(self.state.get("price_history") or [])
-        if not self._has_enough_history():
-            minutes = int(empty["elapsed"] // 60)
-            logger.info(
-                f"[{self.symbol}] รอสะสมข้อมูลราคาต่อเนื่อง {minutes}/120 นาที"
+            """ประเมินเข้าซื้อ 2 ทาง: ยืนยันแล้ว (1-2ชม.) หรือขยับทีละนิดก่อนพุ่ง (แค่ 60 นาที) — ชม.3 ห้ามซื้อทั้งคู่"""
+            empty = {
+                "ready": False, "should_buy": False, "direction": None, "confidence": 0,
+                "change_1h": 0.0, "change_2h": None, "change_3h": None, "net_2h": None,
+                "vetoed": False, "reason": "unknown", "elapsed": 0.0,
+                "entry_path": None, "gradual_reason": None,
+            }
+            if current_price is None:
+                empty["reason"] = "no_price"
+                return empty
+    
+            empty["elapsed"] = history_elapsed_sec(self.state.get("price_history") or [])
+    
+            # ขั้นต่ำที่ต้องมีคือ 60 นาที (พอสำหรับสูตรขยับทีละนิด) — ไม่ต้องรอครบ 2 ชม.แบบเดิมอีกแล้ว
+            min_needed_sec = GRADUAL_WINDOW_MINUTES * 60
+            if empty["elapsed"] < min_needed_sec:
+                minutes = int(empty["elapsed"] // 60)
+                logger.info(f"[{self.symbol}] รอสะสมข้อมูลราคาต่อเนื่อง {minutes}/{GRADUAL_WINDOW_MINUTES} นาที")
+                empty["reason"] = "waiting_history"
+                return empty
+    
+            price_1h_ago = self._price_at_offset(3600)
+            price_2h_ago = self._price_at_offset(7200)
+            price_3h_ago = self._price_at_offset(10800)
+    
+            # evaluate_entry_signal จัดการค่า None ให้เองอยู่แล้ว (ถ้ายังไม่มีข้อมูล 2 ชม. จะแค่ไม่ผ่านทาง "ยืนยันแล้ว")
+            signal = evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
+            gradual = detect_gradual_climb(self.state.get("price_history") or [])
+    
+            hour3_veto = signal.get("change_3h") is not None and signal["change_3h"] < HOUR3_VETO_PERCENT
+            gradual_should_buy = gradual["is_gradual"] and not hour3_veto
+    
+            should_buy = signal["should_buy"] or gradual_should_buy
+            entry_path = "confirmed" if signal["should_buy"] else ("gradual" if gradual_should_buy else None)
+    
+            quote = self.state.get("quote") or {}
+            spread = quote.get("spread_pct")
+            if should_buy and spread is not None and spread > MAX_SPREAD_PERCENT:
+                should_buy = False
+                entry_path = None
+                signal["reason"] = "wide_spread"
+                logger.info(
+                    f"[{self.symbol}] สเปรด {spread:.3f}% กว้างเกิน {MAX_SPREAD_PERCENT}% "
+                    f"(bid {quote.get('bid')} / offer {quote.get('ask')}) — ไม่ซื้อ"
+                )
+    
+            confidence = signal["confidence"]
+            if entry_path == "gradual":
+                confidence = max(confidence, 60)
+    
+            reason = None if should_buy else (
+                signal["reason"] if signal["reason"] not in (None, "unknown") else gradual["reason"]
             )
-            empty["reason"] = "waiting_history"
-            return empty
-
-        price_1h_ago = self._price_at_offset(3600)
-        price_2h_ago = self._price_at_offset(7200)
-        price_3h_ago = self._price_at_offset(10800)
-
-        if price_1h_ago is None or price_2h_ago is None:
-            minutes = int(empty["elapsed"] // 60)
+            gradual_reason_th = REASON_TH.get(gradual["reason"], gradual["reason"] or "")
+            net_txt = f"{signal['net_2h']:+.2f}%" if signal["net_2h"] is not None else "n/a"
+            h2_txt = f"{signal['change_2h']:+.2f}%" if signal["change_2h"] is not None else "n/a"
+            gradual_txt = f"{gradual['total_change']:+.2f}%" if gradual.get("total_change") is not None else "n/a"
+    
             logger.info(
-                f"[{self.symbol}] ข้อมูล 1–2 ชม.ยังไม่ครบ รอสะสมต่อ ({minutes}/120 นาที)"
+                f"[{self.symbol}] ยืนยัน 1-2ชม.: {signal['direction'] or 'flat'} (คะแนน {signal['confidence']}%) "
+                f"ชม.1 {signal['change_1h']:+.2f}% ชม.2 {h2_txt} สุทธิ {net_txt} | "
+                f"ขยับทีละนิด 60นาที: {gradual_txt} ({'ผ่าน' if gradual['is_gradual'] else gradual_reason_th or 'ยังไม่ผ่าน'})"
             )
-            empty["reason"] = "waiting_history"
-            return empty
-
-        signal = evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
-        quote = self.state.get("quote") or {}
-        spread = quote.get("spread_pct")
-        if signal["should_buy"] and spread is not None and spread > MAX_SPREAD_PERCENT:
-            signal["should_buy"] = False
-            signal["reason"] = "wide_spread"
-            logger.info(
-                f"[{self.symbol}] สเปรด {spread:.3f}% กว้างเกิน {MAX_SPREAD_PERCENT}% "
-                f"(bid {quote.get('bid')} / offer {quote.get('ask')}) — ไม่ซื้อ"
-            )
-        reason_th = REASON_TH.get(signal["reason"], signal["reason"] or "พร้อมซื้อ")
-        net_txt = f"{signal['net_2h']:+.2f}%" if signal["net_2h"] is not None else "n/a"
-        h2_txt = f"{signal['change_2h']:+.2f}%" if signal["change_2h"] is not None else "n/a"
-
-        logger.info(
-            f"[{self.symbol}] ทิศทาง: {signal['direction'] or 'flat'} "
-            f"(คะแนน {signal['confidence']}%) ชม.1 {signal['change_1h']:+.2f}% "
-            f"ชม.2 {h2_txt} สุทธิ 2ชม. {net_txt}"
-        )
-        if signal["should_buy"]:
-            logger.info(f"[{self.symbol}] ผ่านเกณฑ์เข้าซื้อ")
-        else:
-            logger.info(f"[{self.symbol}] ไม่เข้าซื้อ — {reason_th}")
-
-        return {
-            "ready": True,
-            "should_buy": signal["should_buy"],
-            "direction": signal["direction"],
-            "confidence": signal["confidence"],
-            "change_1h": signal["change_1h"],
-            "change_2h": signal["change_2h"],
-            "change_3h": signal["change_3h"],
-            "net_2h": signal["net_2h"],
-            "vetoed": signal["vetoed"],
-            "reason": signal["reason"],
-        }
+            if should_buy:
+                path_txt = "ยืนยันแล้ว (1-2ชม.)" if entry_path == "confirmed" else "ขยับทีละนิดก่อนพุ่ง"
+                logger.info(f"[{self.symbol}] ผ่านเกณฑ์เข้าซื้อ — ทาง: {path_txt}")
+            else:
+                logger.info(f"[{self.symbol}] ไม่เข้าซื้อ — {REASON_TH.get(reason, reason or 'พร้อมซื้อ')}")
+    
+            return {
+                "ready": True, "should_buy": should_buy, "direction": signal["direction"],
+                "confidence": confidence, "change_1h": signal["change_1h"], "change_2h": signal["change_2h"],
+                "change_3h": signal["change_3h"], "net_2h": signal["net_2h"],
+                "vetoed": signal["vetoed"] or hour3_veto, "reason": reason,
+                "entry_path": entry_path, "gradual_reason": gradual["reason"],
+            }
 
     def try_enter_position(self, current_price, available_slots=1):
         """เข้าซื้อ — ใช้ % ของ 'เงินที่แบ่งให้ไม้นี้' ไม่ใช่ % ของเงินว่างทั้งหมด
@@ -2353,19 +2498,12 @@ def _render_card(label, value, sub="", value_class=""):
 
 
 def _trend_from_state(state):
-    """สูตรเดียวกับบอท: 2 ชม.เป็นหลัก ชม.3 แค่ห้ามซื้อ"""
+    """สูตรเดียวกับบอท: ยืนยันแล้ว (1-2ชม.) หรือขยับทีละนิดก่อนพุ่ง (60นาที) — ชม.3 ห้ามซื้อทั้งคู่"""
     empty = {
-        "direction": None,
-        "confidence": 0,
-        "current": None,
-        "change_1h": 0.0,
-        "change_2h": None,
-        "change_3h": None,
-        "net_2h": None,
-        "elapsed": 0.0,
-        "should_buy": False,
-        "vetoed": False,
-        "reason": "unknown",
+        "direction": None, "confidence": 0, "current": None, "change_1h": 0.0,
+        "change_2h": None, "change_3h": None, "net_2h": None, "elapsed": 0.0,
+        "should_buy": False, "vetoed": False, "reason": "unknown",
+        "entry_path": None, "gradual_reason": None,
     }
     history = trim_to_continuous_recent(state.get("price_history") or [])
     if not history:
@@ -2375,6 +2513,11 @@ def _trend_from_state(state):
     now = time.time()
     empty["current"] = current
     empty["elapsed"] = history_elapsed_sec(history, now)
+
+    min_needed_sec = GRADUAL_WINDOW_MINUTES * 60
+    if empty["elapsed"] < min_needed_sec:
+        empty["reason"] = "waiting_history"
+        return empty
 
     def price_at(seconds_ago, tolerance=PRICE_OFFSET_TOLERANCE_SEC):
         target = now - seconds_ago
@@ -2386,14 +2529,31 @@ def _trend_from_state(state):
     p1 = price_at(3600)
     p2 = price_at(7200)
     p3 = price_at(10800)
-    if empty["elapsed"] < HISTORY_NEEDED_SEC or p1 is None or p2 is None:
-        empty["reason"] = "waiting_history"
-        if p1 and current:
-            empty["change_1h"] = _pct_change(current, p1) or 0.0
-        return empty
+
     signal = evaluate_entry_signal(current, p1, p2, p3)
+    gradual = detect_gradual_climb(history, now=now)
+
+    hour3_veto = signal.get("change_3h") is not None and signal["change_3h"] < HOUR3_VETO_PERCENT
+    gradual_should_buy = gradual["is_gradual"] and not hour3_veto
+    should_buy = signal["should_buy"] or gradual_should_buy
+    entry_path = "confirmed" if signal["should_buy"] else ("gradual" if gradual_should_buy else None)
+
+    confidence = signal["confidence"]
+    if entry_path == "gradual":
+        confidence = max(confidence, 60)
+
+    reason = None if should_buy else (
+        signal["reason"] if signal["reason"] not in (None, "unknown") else gradual["reason"]
+    )
+
     signal["current"] = current
     signal["elapsed"] = empty["elapsed"]
+    signal["should_buy"] = should_buy
+    signal["confidence"] = confidence
+    signal["vetoed"] = signal["vetoed"] or hour3_veto
+    signal["reason"] = reason
+    signal["entry_path"] = entry_path
+    signal["gradual_reason"] = gradual["reason"]
     return signal
 
 
