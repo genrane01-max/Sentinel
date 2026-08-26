@@ -2911,9 +2911,9 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         elif status == "HOLDING":
             entry_txt = _fmt_thb(float(st.get("entry_price", 0) or 0))
             if st.get("entry_price_estimated"):
-                sub = f"ต้นทุนประมาณ {entry_txt} ฿ (ยืนยันจับคู่ไม่ได้) · ดูแลด้วย trailing / stop loss แบบเดิม"
+                sub = f"ต้นทุนประมาณ {entry_txt} ฿ (ยืนยันจับคู่ไม่ได้) · ดูแลด้วย trailing / stop loss "
             else:
-                sub = f"ต้นทุน {entry_txt} ฿ · ดูแลด้วย trailing / stop loss แบบเดิม"
+                sub = f"ต้นทุน {entry_txt} ฿ · ดูแลด้วย trailing / stop loss "
         elif status == "HALTED":
             sub = "ยังดึงราคาไม่ได้ — บอทจะถือต่อเองเมื่อมีราคาตลาด แล้วขายได้ ไม่ต้องรอปลดจากเว็บ"
         elif elapsed and elapsed < HISTORY_NEEDED_SEC:
