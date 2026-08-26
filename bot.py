@@ -206,9 +206,9 @@ MAX_SPREAD_PERCENT = 0.5         # ไม่ซื้อถ้า (ask-bid)/mid 
 GRADUAL_WINDOW_MINUTES = 60          # ดูย้อนหลังกี่นาทีเพื่อหาจังหวะขยับทีละนิดก่อนพุ่ง
 GRADUAL_BUCKET_MINUTES = 10          # แบ่งหน้าต่างเป็นช่วงละกี่นาที (60/10 = 6 ช่วง)
 GRADUAL_MIN_BUCKET_PERCENT = 0.03    # นับเป็น "ขยับขึ้น" ถ้าช่วงนั้นขึ้นอย่างน้อยเท่านี้
-GRADUAL_MAX_BUCKET_PERCENT = 0.5     # ช่วงไหนขึ้น/ลงแรงเกินนี้ = ไม่ใช่ขยับทีละนิดแล้ว
-GRADUAL_MIN_POSITIVE_RATIO = 0.8     # ต้องมีช่วงที่ขึ้นอย่างน้อยเท่านี้ % ของทั้งหมด
-GRADUAL_MIN_TOTAL_PERCENT = 0.6      # ← ปรับจาก 0.35 เป็น 0.6 (สูงกว่าค่าฟี 0.4% พอสมควร)
+GRADUAL_MAX_BUCKET_PERCENT = 0.8       # ช่วงไหนขึ้น/ลงแรงเกินนี้ = ไม่ใช่ขยับทีละนิดแล้ว
+GRADUAL_MIN_POSITIVE_RATIO = 0.5     # ต้องมีช่วงที่ขึ้นอย่างน้อยเท่านี้ % ของทั้งหมด
+GRADUAL_MIN_TOTAL_PERCENT = 0.5      # ← ปรับจาก 0.35 เป็น 0.6 (สูงกว่าค่าฟี 0.4% พอสมควร)
 GRADUAL_MAX_TOTAL_PERCENT = 2.5      # รวมทั้งหน้าต่างขึ้นเกินนี้ = สายไปแล้ว
 ORDER_SEND_PATH = "/api/v1/digital-asset/order/send"
 PENDING_ORDER_TTL_SEC = 600  # ล็อกกันยิงซ้ำอย่างน้อย 10 นาที — ห้ามปลดแค่เพราะหมดเวลาถ้ายังไม่เช็คพอร์ต
