@@ -263,75 +263,68 @@ def _first_book_price(levels):
 def parse_market_quote(data):
     """
     แปลงข้อมูลตลาดจาก InnovestX ให้เป็น:
-    bid = ราคาซื้อสูงสุดใน Order Book
-    ask = ราคาขายต่ำสุดใน Order Book
-    last = ราคาซื้อขายล่าสุด
-
-    InnovestX Level 2:
-      side=0 -> Buy / Bid
-      side=1 -> Sell / Ask
+    bid, ask, last, mid, spread, spread_pct
+    รองรับ side=0/1 และ insideBidPrice/insideAskPrice
     """
-
     result = {
         "bid": None,
         "ask": None,
         "last": None,
+        "mid": None,
         "spread": None,
+        "spread_pct": None,
     }
-
     if not isinstance(data, dict):
         return result
 
-    # --------------------------------------------------
-    # 1) ดึง data
-    # --------------------------------------------------
     rows = data.get("data")
-
     if isinstance(rows, dict):
         rows = [rows]
-
     if not isinstance(rows, list):
         rows = []
 
-    # --------------------------------------------------
-    # 2) อ่าน Level 2 Order Book
-    # --------------------------------------------------
     bids = []
     asks = []
 
     for row in rows:
         if not isinstance(row, dict):
             continue
-
         try:
             price = float(row.get("price"))
         except (TypeError, ValueError):
-            continue
-
+            price = None
         side = row.get("side")
+        if price is not None:
+            if side in (0, "0", "Buy", "BUY", "buy"):
+                bids.append(price)
+            elif side in (1, "1", "Sell", "SELL", "sell"):
+                asks.append(price)
 
-        # InnovestX บาง response อาจเป็นตัวเลข
-        if side in (0, "0", "Buy", "BUY", "buy"):
-            bids.append(price)
+        # สำรองจาก Ticker (ถ้ามี)
+        if result["bid"] is None:
+            try:
+                inside_bid = float(row.get("insideBidPrice"))
+                if inside_bid > 0:
+                    result["bid"] = inside_bid
+            except (TypeError, ValueError):
+                pass
+        if result["ask"] is None:
+            try:
+                inside_ask = float(row.get("insideAskPrice"))
+                if inside_ask > 0:
+                    result["ask"] = inside_ask
+            except (TypeError, ValueError):
+                pass
 
-        elif side in (1, "1", "Sell", "SELL", "sell"):
-            asks.append(price)
-
-    # Bid = ราคาซื้อสูงสุด
     if bids:
         result["bid"] = max(bids)
-
-    # Ask = ราคาขายต่ำสุด
     if asks:
         result["ask"] = min(asks)
 
-    # --------------------------------------------------
-    # 3) lastTradePrice
-    # --------------------------------------------------
+    # lastTradePrice
     for row in rows:
         if not isinstance(row, dict):
             continue
-
         try:
             last = float(row.get("lastTradePrice"))
             if last > 0:
@@ -340,11 +333,12 @@ def parse_market_quote(data):
         except (TypeError, ValueError):
             pass
 
-    # --------------------------------------------------
-    # 4) คำนวณ Spread
-    # --------------------------------------------------
+    # คำนวณ mid, spread, spread_pct
     if result["bid"] is not None and result["ask"] is not None:
+        result["mid"] = (result["bid"] + result["ask"]) / 2
         result["spread"] = result["ask"] - result["bid"]
+        if result["mid"] > 0:
+            result["spread_pct"] = (result["spread"] / result["mid"]) * 100
 
     return result
 
