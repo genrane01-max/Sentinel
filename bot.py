@@ -10,7 +10,7 @@ InnovestX Automated Trading Bot — Price Action 2H Strategy
 5. แดชบอร์ดใช้สูตรเดียวกับบอท
 6. มีเหรียญแต่ยืนยันราคาจับคู่ไม่ได้ — ถือต่อทันทีด้วยต้นทุนประมาณ แล้วขาย/trailing ได้เลย ไม่รอปลดจากเว็บ
 7. แจ้งเตือน Telegram + หยุดเฝ้าต่อเหรียญหลังตัดขาดทุน (กดเฝ้าต่อเองจากหน้าเว็บ)
-8. สัญญาณกลับตัว 15 นาที ล็อกกำไรเหนือจุดคุ้มทุน โดยไม่ต้องรอ trailing arm
+8. สัญญาณกลับตัวล็อกกำไรเหนือจุดคุ้มทุน โดยไม่ต้องรอ trailing arm — แล้วคูลดาวน์ 20 นาทีก่อนซื้อเหรียญนี้คืน
 
 ของเดิมยังอยู่ครบ: แดชบอร์ด, หยุด/เริ่มเทรด, รหัสผ่าน, % ขาดทุนต่อวัน, อัตราเงินต่อไม้,
 จำนวนไม้ขาดทุนติดกัน, price_history ต่อเหรียญ, ค่าธรรมเนียม, circuit breaker, Decimal, graceful shutdown
@@ -216,6 +216,7 @@ REVERSAL_BUCKET_MINUTES = 3.3        # แบ่งหน้าต่างเ�
 REVERSAL_MIN_BUCKET_DOWN_PERCENT = -0.12  # นับเป็น "ลง" ถ้าช่วงนั้นลงอย่างน้อยเท่านี้
 REVERSAL_MIN_DOWN_RATIO = 0.66       # ต้องมีช่วงที่ลงอย่างน้อยเท่านี้ของทั้งหมด (2 ใน 3)
 REVERSAL_MIN_TOTAL_PERCENT = -0.20   # รวมทั้งหน้าต่างต้องลงอย่างน้อยเท่านี้
+REVERSAL_COOLDOWN_MINUTES = 20       # ขายด้วยสัญญาณกลับตัวแล้ว ห้ามซื้อเหรียญนี้คืนกี่นาที
 ORDER_SEND_PATH = "/api/v1/digital-asset/order/send"
 PENDING_ORDER_TTL_SEC = 600  # ล็อกกันยิงซ้ำอย่างน้อย 10 นาที — ห้ามปลดแค่เพราะหมดเวลาถ้ายังไม่เช็คพอร์ต
 RECENT_ORDER_LOOKBACK_SEC = 180
@@ -1264,6 +1265,7 @@ class InnovestXTradingBot:
             "pending_order": None,  # คำสั่งที่ timeout แล้วยังไม่รู้ว่าเข้าหรือไม่ — ห้ามยิงซ้ำ
             "halt_cleared_by_user": False,
             "entry_price_estimated": False,  # True = ถือด้วยต้นทุนประมาณ เพราะยืนยัน fill ไม่ได้
+            "reversal_cooldown_until": 0.0,  # epoch วินาที — ห้ามเปิดไม้ใหม่ก่อนถึงเวลานี้
         }
         try:
             saved = primary_ref(self.state_path).get()
@@ -2066,6 +2068,14 @@ class InnovestXTradingBot:
         if is_watch_paused(self.symbol):
             logger.info(f"[{self.symbol}] หยุดเฝ้าอยู่ — ไม่เปิดไม้ซื้อ (กดเฝ้าต่อที่หน้าเว็บถ้าต้องการ)")
             return False
+        cooldown_until = float(self.state.get("reversal_cooldown_until") or 0.0)
+        if time.time() < cooldown_until:
+            remaining_min = int((cooldown_until - time.time()) / 60) + 1
+            logger.info(
+                f"[{self.symbol}] เพิ่งขายด้วยสัญญาณกลับตัว — คูลดาวน์อีก ~{remaining_min} "
+                f"นาที ไม่เปิดไม้ใหม่"
+            )
+            return False
 
         if self._has_unresolved_order():
             logger.warning(f"[{self.symbol}] มี pending หลัง timeout — เคลียร์จากพอร์ต ไม่ยิงคำสั่งใหม่")
@@ -2258,6 +2268,10 @@ class InnovestXTradingBot:
         self.state.update({
             "status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0,
             "dust_quantity": float(self.state.get("dust_quantity") or 0.0),
+            "reversal_cooldown_until": (
+                time.time() + REVERSAL_COOLDOWN_MINUTES * 60
+                if reason == "momentum_reversal" else 0.0
+            ),
             "pending_order": None, "entry_price_estimated": False,
         })
         self._register_trade_result(pnl_thb)

@@ -580,13 +580,13 @@ class TrailingStopTests(unittest.TestCase):
 
 
 def _reversal_history(now, marks):
-    """marks: ราคาที่ 15, 10, 5, 0 นาทีที่แล้ว"""
-    return [
-        [now - 15 * 60, marks[0]],
-        [now - 10 * 60, marks[1]],
-        [now - 5 * 60, marks[2]],
-        [now, marks[3]],
-    ]
+    """marks: ราคาที่แต่ละจุดของหน้าต่างกลับตัว (เก่า → ใหม่ รวมจุดเริ่ม) ตามค่าคงที่ปัจจุบัน"""
+    window_sec = bot.REVERSAL_WINDOW_MINUTES * 60
+    bucket_sec = bot.REVERSAL_BUCKET_MINUTES * 60
+    n = int(bot.REVERSAL_WINDOW_MINUTES // bot.REVERSAL_BUCKET_MINUTES)
+    if len(marks) != n + 1:
+        raise AssertionError(f"need {n + 1} marks for current reversal window, got {len(marks)}")
+    return [[now - window_sec + i * bucket_sec, marks[i]] for i in range(n + 1)]
 
 
 class MomentumReversalTests(unittest.TestCase):
@@ -691,6 +691,84 @@ class MomentumReversalTests(unittest.TestCase):
         self.assertEqual(len(notes), 1)
         self.assertIn("สัญญาณกลับตัว", notes[0])
         self.assertIn("ETH", notes[0])
+
+    def _successful_sell_bot(self, reason):
+        b = bot.InnovestXTradingBot("k", "s", symbol="ETHTHB")
+        b.state.update({
+            "status": "HOLDING",
+            "entry_price": 100.0,
+            "highest_price": 101.0,
+            "quantity": 0.5,
+            "roundtrip_fee_percent": 0.4,
+            "dust_quantity": 0.0,
+        })
+        b.get_free_balance = lambda: (1000.0, 0.5, False)
+        b.get_symbol_rules = lambda: {
+            "quantity_increment": "0.00001000",
+            "price_increment": "0.01",
+            "decimal_places": 8,
+        }
+        b.execute_market_order = lambda **kw: {"code": "0000", "data": {"orderId": "abc"}}
+        b.confirm_fill_price = lambda *a, **k: 101.0
+        b.save_state = lambda: None
+        b._register_trade_result = lambda pnl: None
+        b._after_successful_sell = lambda *a, **k: None
+        b.sell_position(0.5, 101.0, reason=reason)
+        return b
+
+    def test_reversal_sell_sets_cooldown(self):
+        before = time.time()
+        b = self._successful_sell_bot("momentum_reversal")
+        until = float(b.state.get("reversal_cooldown_until") or 0.0)
+        self.assertGreater(until, before + bot.REVERSAL_COOLDOWN_MINUTES * 60 - 2)
+        self.assertLessEqual(until, time.time() + bot.REVERSAL_COOLDOWN_MINUTES * 60 + 1)
+
+    def test_trailing_sell_clears_cooldown(self):
+        b = self._successful_sell_bot("trailing")
+        self.assertEqual(float(b.state.get("reversal_cooldown_until") or 0.0), 0.0)
+
+    def test_cooldown_blocks_new_entry(self):
+        b = bot.InnovestXTradingBot("k", "s", symbol="BTCTHB")
+        b.save_state = lambda: None
+        b.save_market = lambda **k: None
+        b.state["status"] = "IDLE"
+        b.state["reversal_cooldown_until"] = time.time() + 600
+        called = {"bal": False}
+
+        def fake_bal():
+            called["bal"] = True
+            return (5000.0, 0.0, False)
+
+        b.get_free_balance = fake_bal
+        b.execute_market_order = lambda **kw: (_ for _ in ()).throw(AssertionError("must not buy during cooldown"))
+        ok = b.try_enter_position(100.0)
+        self.assertFalse(ok)
+        self.assertFalse(called["bal"])
+        self.assertEqual(b.state["status"], "IDLE")
+
+    def test_expired_cooldown_does_not_block_entry(self):
+        b = bot.InnovestXTradingBot("k", "s", symbol="BTCTHB")
+        b.save_state = lambda: None
+        b.save_market = lambda **k: None
+        b.get_symbol_rules = lambda: {
+            "quantity_increment": "0.00001000",
+            "price_increment": "0.01",
+            "decimal_places": 8,
+        }
+        b.state["status"] = "IDLE"
+        b.state["quote"] = {"bid": 99.0, "ask": 100.0, "last": 99.5, "spread_pct": 0.1}
+        b.state["reversal_cooldown_until"] = time.time() - 1
+        called = {"bal": False}
+
+        def fake_bal():
+            called["bal"] = True
+            return (0.0, 0.0, False)
+
+        b.get_free_balance = fake_bal
+        b.execute_market_order = lambda **kw: (_ for _ in ()).throw(AssertionError("must not buy with empty wallet"))
+        ok = b.try_enter_position(100.0)
+        self.assertFalse(ok)
+        self.assertTrue(called["bal"])
 
 
 class WatchPauseTests(unittest.TestCase):
