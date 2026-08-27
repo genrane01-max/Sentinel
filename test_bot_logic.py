@@ -271,6 +271,37 @@ class OrderSafetyTests(unittest.TestCase):
         b.sell_position(0.5, 100.0)
         self.assertEqual(b.state["status"], "IDLE")
 
+    def test_sell_keeps_unsellable_dust_for_next_buy(self):
+        b = bot.InnovestXTradingBot("k", "s", symbol="ETHTHB")
+        b.state.update({
+            "status": "HOLDING",
+            "entry_price": 100000.0,
+            "highest_price": 101000.0,
+            "quantity": 0.0227,
+            "roundtrip_fee_percent": 0.4,
+            "dust_quantity": 0.0,
+        })
+        b.get_free_balance = lambda: (1000.0, 0.0227544, False)
+        b.get_symbol_rules = lambda: {
+            "quantity_increment": "0.0001",
+            "price_increment": "0.01",
+            "decimal_places": 8,
+        }
+        b.execute_market_order = lambda **kw: {"code": "0000", "data": {"orderId": "abc"}}
+        b.confirm_fill_price = lambda *a, **k: 101000.0
+        b.save_state = lambda: None
+        b._register_trade_result = lambda pnl: None
+        b._after_successful_sell = lambda *a, **k: None
+        b.sell_position(0.0227, 101000.0)
+        self.assertEqual(b.state["status"], "IDLE")
+        self.assertEqual(b.state["quantity"], 0.0)
+        self.assertAlmostEqual(b.state["dust_quantity"], 0.0000544, places=7)
+
+        b._adopt_filled_buy(100000.0, 0.05, 0.4)
+        self.assertEqual(b.state["status"], "HOLDING")
+        self.assertAlmostEqual(b.state["quantity"], 0.0500544, places=7)
+        self.assertEqual(b.state["dust_quantity"], 0.0)
+
     def test_timeout_does_not_resend_order(self):
         b = bot.InnovestXTradingBot("k", "s", symbol="SOLTHB")
         calls = {"n": 0}

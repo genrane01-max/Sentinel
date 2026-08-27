@@ -1188,6 +1188,7 @@ class InnovestXTradingBot:
             "entry_price": 0.0,
             "highest_price": 0.0,
             "quantity": 0.0,
+            "dust_quantity": 0.0,  # เศษที่ขายไม่หมดเพราะขั้นต่ำของตลาด — รวมเข้าไม้ถัดไป
             "roundtrip_fee_percent": self.DEFAULT_ROUNDTRIP_FEE_PERCENT,
             "price_history": [],  # [[timestamp_sec, price], ...] เก็บย้อนหลัง 3 ชม. อยู่บน DB2
             "quote": {},          # bid/ask/last/spread ล่าสุด อยู่บน DB2
@@ -1494,6 +1495,36 @@ class InnovestXTradingBot:
         except (TypeError, ValueError, KeyError):
             return 0.0
 
+    def _absorb_dust_into_qty(self, qty):
+        """รวมเศษที่ขายไม่หมดรอบก่อนเข้าจำนวนไม้ใหม่ แล้วล้าง dust_quantity"""
+        try:
+            dust = Decimal(str(self.state.get("dust_quantity") or 0))
+            qty = Decimal(str(qty or 0)) + dust
+            qty_f = float(qty)
+            dust_f = float(dust)
+        except (InvalidOperation, ValueError, TypeError):
+            dust_f = float(self.state.get("dust_quantity") or 0.0)
+            qty_f = float(qty or 0.0) + dust_f
+        if dust_f > 0:
+            logger.info(f"[{self.symbol}] รวมเศษค้าง {dust_f} เข้าจำนวนที่ถือ — รวม {qty_f}")
+        return qty_f
+
+    def _stash_unsellable_dust(self, coin_free, sell_qty):
+        """เก็บเศษที่ปัดทิ้งเพราะขั้นต่ำของตลาด ไว้รวมกับไม้ถัดไป — ใช้ยอดในกระเป๋าจริง ไม่ใช่จำนวนใน state ที่ถูกปัดแล้ว"""
+        try:
+            leftover = max(Decimal("0"), Decimal(str(coin_free or 0)) - Decimal(str(sell_qty or 0)))
+            leftover = float(leftover)
+        except (InvalidOperation, ValueError, TypeError):
+            leftover = max(0.0, float(coin_free or 0.0) - float(sell_qty or 0.0))
+        prev = float(self.state.get("dust_quantity") or 0.0)
+        self.state["dust_quantity"] = prev + leftover
+        if leftover > 0:
+            logger.info(
+                f"[{self.symbol}] ขายได้ {sell_qty} เหลือเศษ {leftover} "
+                f"(ต่ำกว่าขั้นต่ำของตลาด ขายต่อไม่ได้) เก็บไว้รวมกับไม้ถัดไป"
+            )
+        return leftover
+
     def _has_unresolved_order(self):
         """ล็อก pending ยังอยู่หรือไม่ — ไม่ปลดแค่เพราะหมดเวลา ต้องเคลียร์จากพอร์ต/ออเดอร์จริง"""
         pending = self.state.get("pending_order") or {}
@@ -1630,11 +1661,13 @@ class InnovestXTradingBot:
         return last
 
     def _adopt_filled_buy(self, avg_price, qty, fee_pct):
+        qty = self._absorb_dust_into_qty(qty)
         self.state.update({
             "status": "HOLDING",
             "entry_price": avg_price,
             "highest_price": avg_price,
             "quantity": qty,
+            "dust_quantity": 0.0,
             "roundtrip_fee_percent": fee_pct,
             "pending_order": None,
             "entry_price_estimated": False,
@@ -1682,11 +1715,13 @@ class InnovestXTradingBot:
         fee_pct = self.estimate_roundtrip_fee_percent()
         latest = _safe_float(quote_mark_price(self.state.get("quote") or {}, "last"), 0.0) or 0.0
         highest = max(px, latest, float(self.state.get("highest_price") or 0.0))
+        qty = self._absorb_dust_into_qty(qty)
         self.state.update({
             "status": "HOLDING",
             "entry_price": px,
             "highest_price": highest,
             "quantity": qty,
+            "dust_quantity": 0.0,
             "roundtrip_fee_percent": fee_pct,
             "pending_order": None,
             "entry_price_estimated": True,
@@ -2147,8 +2182,10 @@ class InnovestXTradingBot:
             f"{fee_pct:.3f}% = {pnl_thb:.2f} THB"
         )
 
+        self._stash_unsellable_dust(coin_free, sell_qty)
         self.state.update({
             "status": "IDLE", "entry_price": 0.0, "highest_price": 0.0, "quantity": 0.0,
+            "dust_quantity": float(self.state.get("dust_quantity") or 0.0),
             "pending_order": None, "entry_price_estimated": False,
         })
         self._register_trade_result(pnl_thb)
@@ -2672,7 +2709,11 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             entry = float(st.get("entry_price", 0.0) or 0.0)
             qty = float(st.get("quantity", 0.0) or 0.0)
             if px is not None and entry:
-                total_unrealized += qty * (px - entry)
+                fee_pct = float(
+                    st.get("roundtrip_fee_percent")
+                    or InnovestXTradingBot.DEFAULT_ROUNDTRIP_FEE_PERCENT
+                )
+                total_unrealized += net_pnl_thb(entry, px, qty, fee_pct)
         hist = st.get("price_history") or []
         if hist:
             ts = hist[-1][0]
