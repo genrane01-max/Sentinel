@@ -202,7 +202,7 @@ HOUR3_VETO_PERCENT = -1.5        # ชม.3 ลงแรงกว่านี้
 # คะแนนสะสม: ชม.1 ผ่าน +50, ชม.2 ขึ้น +30, สุทธิ 2 ชม.ผ่าน +20, ชม.2 ลงหักเหลือ ~10
 # ซื้อเมื่อ confidence >= MIN_CONFIDENCE_TO_BUY และไม่โดน veto (ไล่หัว / ชม.3 ลงแรง)
 MIN_CONFIDENCE_TO_BUY = 80
-MAX_SPREAD_PERCENT = 0.5         # ไม่ซื้อถ้า (ask-bid)/mid กว้างเกินนี้ (%)
+MAX_SPREAD_PERCENT = 0.7             # ไม่ซื้อถ้า (ask-bid)/mid กว้างเกินนี้ (%)
 GRADUAL_WINDOW_MINUTES = 60          # ดูย้อนหลังกี่นาทีเพื่อหาจังหวะขยับทีละนิดก่อนพุ่ง
 GRADUAL_BUCKET_MINUTES = 10          # แบ่งหน้าต่างเป็นช่วงละกี่นาที (60/10 = 6 ช่วง)
 GRADUAL_MIN_BUCKET_PERCENT = 0.03    # นับเป็น "ขยับขึ้น" ถ้าช่วงนั้นขึ้นอย่างน้อยเท่านี้
