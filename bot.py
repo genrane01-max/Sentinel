@@ -211,8 +211,8 @@ GRADUAL_MAX_BUCKET_PERCENT = 0.5       # ช่วงไหนขึ้น/ล�
 GRADUAL_MIN_POSITIVE_RATIO = 0.7     # ต้องมีช่วงที่ขึ้นอย่างน้อยเท่านี้ % ของทั้งหมด
 GRADUAL_MIN_TOTAL_PERCENT = 0.6      # ← ปรับจาก 0.35 เป็น 0.6 (สูงกว่าค่าฟี 0.4% พอสมควร)
 GRADUAL_MAX_TOTAL_PERCENT = 2.5      # รวมทั้งหน้าต่างขึ้นเกินนี้ = สายไปแล้ว
-REVERSAL_WINDOW_MINUTES = 15         # ดูย้อนหลังกี่นาทีเพื่อจับราคาพลิกลง
-REVERSAL_BUCKET_MINUTES = 5          # แบ่งหน้าต่างเป็นช่วงละกี่นาที (15/5 = 3 ช่วง)
+REVERSAL_WINDOW_MINUTES = 10         # ดูย้อนหลังกี่นาทีเพื่อจับราคาพลิกลง
+REVERSAL_BUCKET_MINUTES = 3.3        # แบ่งหน้าต่างเป็นช่วงละกี่นาที (15/5 = 3 ช่วง)
 REVERSAL_MIN_BUCKET_DOWN_PERCENT = -0.12  # นับเป็น "ลง" ถ้าช่วงนั้นลงอย่างน้อยเท่านี้
 REVERSAL_MIN_DOWN_RATIO = 0.66       # ต้องมีช่วงที่ลงอย่างน้อยเท่านี้ของทั้งหมด (2 ใน 3)
 REVERSAL_MIN_TOTAL_PERCENT = -0.20   # รวมทั้งหน้าต่างต้องลงอย่างน้อยเท่านี้
