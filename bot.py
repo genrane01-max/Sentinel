@@ -215,7 +215,7 @@ REVERSAL_WINDOW_MINUTES = 15         # ดูย้อนหลังกี่�
 REVERSAL_BUCKET_MINUTES = 5          # แบ่งหน้าต่างเป็นช่วงละกี่นาที (15/5 = 3 ช่วง)
 REVERSAL_MIN_BUCKET_DOWN_PERCENT = -0.12  # นับเป็น "ลง" ถ้าช่วงนั้นลงอย่างน้อยเท่านี้
 REVERSAL_MIN_DOWN_RATIO = 0.66       # ต้องมีช่วงที่ลงอย่างน้อยเท่านี้ของทั้งหมด (2 ใน 3)
-REVERSAL_MIN_TOTAL_PERCENT = -0.25   # รวมทั้งหน้าต่างต้องลงอย่างน้อยเท่านี้
+REVERSAL_MIN_TOTAL_PERCENT = -0.20   # รวมทั้งหน้าต่างต้องลงอย่างน้อยเท่านี้
 ORDER_SEND_PATH = "/api/v1/digital-asset/order/send"
 PENDING_ORDER_TTL_SEC = 600  # ล็อกกันยิงซ้ำอย่างน้อย 10 นาที — ห้ามปลดแค่เพราะหมดเวลาถ้ายังไม่เช็คพอร์ต
 RECENT_ORDER_LOOKBACK_SEC = 180
