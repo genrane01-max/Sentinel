@@ -3332,7 +3332,7 @@ if __name__ == "__main__":
     health_thread.start()
     logger.info("เปิด /health แล้ว กำลังเชื่อม Firebase — ถ้าเชื่อมช้า Render จะไม่คิดว่าเครื่องตาย")
 
-    POLL_INTERVAL_SEC = 14
+    POLL_INTERVAL_SEC = 12
 
     control = wait_for_fresh_control()
     if _CONTROL_CACHE.get("fresh") and not control.get("_uninitialized"):
