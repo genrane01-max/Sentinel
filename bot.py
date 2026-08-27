@@ -220,7 +220,7 @@ ORDER_SEND_PATH = "/api/v1/digital-asset/order/send"
 PENDING_ORDER_TTL_SEC = 600  # ล็อกกันยิงซ้ำอย่างน้อย 10 นาที — ห้ามปลดแค่เพราะหมดเวลาถ้ายังไม่เช็คพอร์ต
 RECENT_ORDER_LOOKBACK_SEC = 180
 MARKET_HISTORY_FLUSH_SEC = 15
-PRICE_TICK_MIN_INTERVAL_SEC = 12
+PRICE_TICK_MIN_INTERVAL_SEC = 10
 PRICE_TICK_MIN_MOVE_PERCENT = 0.05
 HISTORY_NEEDED_SEC = 7200          # ต้องมีราคาต่อเนื่อง 2 ชม. ก่อนซื้อ
 HISTORY_KEEP_SEC = 10800           # เก็บย้อนหลัง 3 ชม.
@@ -3448,7 +3448,7 @@ if __name__ == "__main__":
     health_thread.start()
     logger.info("เปิด /health แล้ว กำลังเชื่อม Firebase — ถ้าเชื่อมช้า Render จะไม่คิดว่าเครื่องตาย")
 
-    POLL_INTERVAL_SEC = 12
+    POLL_INTERVAL_SEC = 10
 
     control = wait_for_fresh_control()
     if _CONTROL_CACHE.get("fresh") and not control.get("_uninitialized"):
