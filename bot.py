@@ -1,4 +1,4 @@
-รึ"""
+"""
 InnovestX Automated Trading Bot — Price Action 2H Strategy
 (v7, เข้าซื้อด้วย 2 ชม.เป็นหลัก / ชม.3 ห้ามซื้อถ้าลงแรง / bid-offer ลงฐานที่ 2)
 
