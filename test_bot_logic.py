@@ -579,6 +579,120 @@ class TrailingStopTests(unittest.TestCase):
         self.assertEqual(sold, ["stop_loss"])
 
 
+def _reversal_history(now, marks):
+    """marks: ราคาที่ 15, 10, 5, 0 นาทีที่แล้ว"""
+    return [
+        [now - 15 * 60, marks[0]],
+        [now - 10 * 60, marks[1]],
+        [now - 5 * 60, marks[2]],
+        [now, marks[3]],
+    ]
+
+
+class MomentumReversalTests(unittest.TestCase):
+    def test_detects_three_bucket_fade(self):
+        now = 2_000_000.0
+        hist = _reversal_history(now, [100.80, 100.65, 100.50, 100.45])
+        sig = bot.detect_momentum_reversal(hist, now=now)
+        self.assertTrue(sig["is_reversal"], sig)
+        self.assertIsNone(sig["reason"])
+        self.assertLessEqual(sig["total_change"], bot.REVERSAL_MIN_TOTAL_PERCENT)
+
+    def test_not_enough_down_buckets(self):
+        now = 2_000_000.0
+        hist = _reversal_history(now, [100.80, 100.79, 100.78, 100.40])
+        sig = bot.detect_momentum_reversal(hist, now=now)
+        self.assertFalse(sig["is_reversal"])
+        self.assertEqual(sig["reason"], "not_enough_down_buckets")
+
+    def test_not_enough_total_drop(self):
+        now = 2_000_000.0
+        hist = _reversal_history(now, [100.50, 100.37, 100.24, 100.30])
+        sig = bot.detect_momentum_reversal(hist, now=now)
+        self.assertFalse(sig["is_reversal"])
+        self.assertIn(sig["reason"], ("not_enough_total_drop", "not_enough_down_buckets"))
+
+    def test_waiting_history(self):
+        now = 2_000_000.0
+        hist = [[now - 60, 100.0], [now, 99.7]]
+        sig = bot.detect_momentum_reversal(hist, now=now)
+        self.assertFalse(sig["is_reversal"])
+        self.assertEqual(sig["reason"], "waiting_history")
+
+    def test_sells_above_breakeven_without_trailing_arm(self):
+        now = time.time()
+        b = bot.InnovestXTradingBot("k", "s", symbol="BTCTHB")
+        b.save_state = lambda: None
+        b.save_market = lambda **k: None
+        b.trailing_stop_percent = 1.0
+        b.stop_loss_percent = 3.0
+        b.state.update({
+            "status": "HOLDING",
+            "entry_price": 100.0,
+            "highest_price": 100.5,  # ยังไม่ถึง 101.4 จึงยังไม่ arm trailing
+            "quantity": 1.0,
+            "roundtrip_fee_percent": 0.4,
+            "quote": {"bid": 100.50, "ask": 100.60, "last": 100.52, "spread_pct": 0.1},
+            "price_history": _reversal_history(now, [100.80, 100.65, 100.50, 100.50]),
+        })
+        sold = []
+        b.sell_position = lambda qty, current_price=None, reason="": sold.append(reason)
+        b.run_strategy(100.52)
+        self.assertEqual(sold, ["momentum_reversal"])
+
+    def test_reversal_below_breakeven_does_not_sell(self):
+        now = time.time()
+        b = bot.InnovestXTradingBot("k", "s", symbol="BTCTHB")
+        b.save_state = lambda: None
+        b.save_market = lambda **k: None
+        b.trailing_stop_percent = 1.0
+        b.stop_loss_percent = 3.0
+        b.state.update({
+            "status": "HOLDING",
+            "entry_price": 100.0,
+            "highest_price": 100.5,
+            "quantity": 1.0,
+            "roundtrip_fee_percent": 0.4,
+            "quote": {"bid": 100.20, "ask": 100.30, "last": 100.22, "spread_pct": 0.1},
+            "price_history": _reversal_history(now, [100.80, 100.65, 100.50, 100.22]),
+        })
+        sold = []
+        b.sell_position = lambda qty, current_price=None, reason="": sold.append(reason)
+        b.run_strategy(100.22)
+        self.assertEqual(sold, [])
+        self.assertEqual(b.state["status"], "HOLDING")
+
+    def test_stop_loss_still_wins_over_reversal(self):
+        now = time.time()
+        b = bot.InnovestXTradingBot("k", "s", symbol="BTCTHB")
+        b.save_state = lambda: None
+        b.save_market = lambda **k: None
+        b.trailing_stop_percent = 1.0
+        b.stop_loss_percent = 3.0
+        b.state.update({
+            "status": "HOLDING",
+            "entry_price": 100.0,
+            "highest_price": 100.5,
+            "quantity": 1.0,
+            "roundtrip_fee_percent": 0.4,
+            "quote": {"bid": 96.50, "ask": 96.80, "last": 96.60, "spread_pct": 0.3},
+            "price_history": _reversal_history(now, [100.80, 100.65, 100.50, 96.60]),
+        })
+        sold = []
+        b.sell_position = lambda qty, current_price=None, reason="": sold.append(reason)
+        b.run_strategy(96.60)
+        self.assertEqual(sold, ["stop_loss"])
+
+    def test_notifies_reversal_sell(self):
+        b = bot.InnovestXTradingBot("k", "s", symbol="ETHTHB")
+        notes = []
+        with patch.object(bot, "notify_telegram", lambda msg: notes.append(msg)):
+            b._after_successful_sell(12.5, reason="momentum_reversal")
+        self.assertEqual(len(notes), 1)
+        self.assertIn("สัญญาณกลับตัว", notes[0])
+        self.assertIn("ETH", notes[0])
+
+
 class WatchPauseTests(unittest.TestCase):
     def test_apply_pause_and_resume(self):
         control = {"watchlist": ["ETHTHB", "SOLTHB"], "paused_symbols": []}

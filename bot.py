@@ -10,6 +10,7 @@ InnovestX Automated Trading Bot — Price Action 2H Strategy
 5. แดชบอร์ดใช้สูตรเดียวกับบอท
 6. มีเหรียญแต่ยืนยันราคาจับคู่ไม่ได้ — ถือต่อทันทีด้วยต้นทุนประมาณ แล้วขาย/trailing ได้เลย ไม่รอปลดจากเว็บ
 7. แจ้งเตือน Telegram + หยุดเฝ้าต่อเหรียญหลังตัดขาดทุน (กดเฝ้าต่อเองจากหน้าเว็บ)
+8. สัญญาณกลับตัว 15 นาที ล็อกกำไรเหนือจุดคุ้มทุน โดยไม่ต้องรอ trailing arm
 
 ของเดิมยังอยู่ครบ: แดชบอร์ด, หยุด/เริ่มเทรด, รหัสผ่าน, % ขาดทุนต่อวัน, อัตราเงินต่อไม้,
 จำนวนไม้ขาดทุนติดกัน, price_history ต่อเหรียญ, ค่าธรรมเนียม, circuit breaker, Decimal, graceful shutdown
@@ -210,6 +211,11 @@ GRADUAL_MAX_BUCKET_PERCENT = 0.5       # ช่วงไหนขึ้น/ล�
 GRADUAL_MIN_POSITIVE_RATIO = 0.7     # ต้องมีช่วงที่ขึ้นอย่างน้อยเท่านี้ % ของทั้งหมด
 GRADUAL_MIN_TOTAL_PERCENT = 0.6      # ← ปรับจาก 0.35 เป็น 0.6 (สูงกว่าค่าฟี 0.4% พอสมควร)
 GRADUAL_MAX_TOTAL_PERCENT = 2.5      # รวมทั้งหน้าต่างขึ้นเกินนี้ = สายไปแล้ว
+REVERSAL_WINDOW_MINUTES = 15         # ดูย้อนหลังกี่นาทีเพื่อจับราคาพลิกลง
+REVERSAL_BUCKET_MINUTES = 5          # แบ่งหน้าต่างเป็นช่วงละกี่นาที (15/5 = 3 ช่วง)
+REVERSAL_MIN_BUCKET_DOWN_PERCENT = -0.12  # นับเป็น "ลง" ถ้าช่วงนั้นลงอย่างน้อยเท่านี้
+REVERSAL_MIN_DOWN_RATIO = 0.66       # ต้องมีช่วงที่ลงอย่างน้อยเท่านี้ของทั้งหมด (2 ใน 3)
+REVERSAL_MIN_TOTAL_PERCENT = -0.25   # รวมทั้งหน้าต่างต้องลงอย่างน้อยเท่านี้
 ORDER_SEND_PATH = "/api/v1/digital-asset/order/send"
 PENDING_ORDER_TTL_SEC = 600  # ล็อกกันยิงซ้ำอย่างน้อย 10 นาที — ห้ามปลดแค่เพราะหมดเวลาถ้ายังไม่เช็คพอร์ต
 RECENT_ORDER_LOOKBACK_SEC = 180
@@ -515,6 +521,65 @@ def detect_gradual_climb(history, now=None, window_minutes=GRADUAL_WINDOW_MINUTE
         return result
 
     result["is_gradual"] = True
+    result["reason"] = None
+    return result
+
+
+def detect_momentum_reversal(history, now=None,
+                              window_minutes=REVERSAL_WINDOW_MINUTES,
+                              bucket_minutes=REVERSAL_BUCKET_MINUTES):
+    """หาสัญญาณกลับตัวระยะสั้น ใช้ล็อกกำไรก่อน trailing % แบบเดิมจะทันตัด
+
+    กลับทิศจาก detect_gradual_climb: แบ่ง 15 นาทีเป็นช่วงละ 5 นาที
+    ถ้าส่วนใหญ่ลง และรวมลงพอ — ขายเหนือจุดคุ้มทุนได้เลย ไม่ต้องรอ trailing arm
+    """
+    result = {"is_reversal": False, "reason": "no_data", "total_change": None, "buckets": []}
+    now = time.time() if now is None else now
+    history = trim_to_continuous_recent(history or [], now)
+    if not history:
+        return result
+    window_sec = window_minutes * 60
+    bucket_sec = bucket_minutes * 60
+    n_buckets = int(window_minutes // bucket_minutes)
+    if n_buckets < 2 or now - history[0][0] < window_sec:
+        result["reason"] = "waiting_history"
+        return result
+
+    def price_at(seconds_ago, tolerance=90):
+        target = now - seconds_ago
+        closest = min(history, key=lambda t: abs(t[0] - target))
+        return closest[1] if abs(closest[0] - target) <= tolerance else None
+
+    marks = []
+    for i in range(n_buckets + 1):
+        px = price_at(window_sec - i * bucket_sec)
+        if px is None:
+            result["reason"] = "gap"
+            return result
+        marks.append(px)
+
+    buckets, declining = [], 0
+    for i in range(n_buckets):
+        pct = _pct_change(marks[i + 1], marks[i])
+        if pct is None:
+            result["reason"] = "gap"
+            return result
+        buckets.append(pct)
+        if pct <= REVERSAL_MIN_BUCKET_DOWN_PERCENT:
+            declining += 1
+    result["buckets"] = buckets
+
+    total_change = _pct_change(marks[-1], marks[0])
+    result["total_change"] = total_change
+
+    if declining / n_buckets < REVERSAL_MIN_DOWN_RATIO:
+        result["reason"] = "not_enough_down_buckets"
+        return result
+    if total_change is None or total_change > REVERSAL_MIN_TOTAL_PERCENT:
+        result["reason"] = "not_enough_total_drop"
+        return result
+
+    result["is_reversal"] = True
     result["reason"] = None
     return result
 
@@ -2092,10 +2157,17 @@ class InnovestXTradingBot:
             breakeven_price = entry_price * (1 + fee_pct / 100)
             min_peak_price = entry_price * (1 + (fee_pct + self.trailing_stop_percent) / 100)
             trailing_armed = highest_price >= min_peak_price
+            reversal = detect_momentum_reversal(self.state.get("price_history") or [])
 
             if sell_mark <= stop_loss_threshold:
                 logger.warning("🚨 ถึงจุด Hard Stop Loss ขายทันทีเพื่อจำกัดความเสียหาย")
                 self.sell_position(qty, sell_mark, reason="stop_loss")
+            elif reversal.get("is_reversal") and sell_mark > breakeven_price:
+                logger.info(
+                    f"⚠️ [{self.symbol}] สัญญาณกลับตัว ({reversal['total_change']:+.2f}% ใน "
+                    f"{REVERSAL_WINDOW_MINUTES} นาที) เหนือจุดคุ้มทุน — ขายล็อกกำไรทันที ไม่รอ trailing"
+                )
+                self.sell_position(qty, sell_mark, reason="momentum_reversal")
             elif sell_mark <= trailing_threshold:
                 if not trailing_armed:
                     logger.info(
@@ -2206,6 +2278,9 @@ class InnovestXTradingBot:
             return
         if reason == "trailing":
             notify_telegram(f"Sentinel ขาย {name} (trailing) {pnl_txt}")
+            return
+        if reason == "momentum_reversal":
+            notify_telegram(f"Sentinel ขาย {name} (สัญญาณกลับตัว) {pnl_txt}")
             return
         notify_telegram(f"Sentinel ขาย {name} {pnl_txt}")
 
