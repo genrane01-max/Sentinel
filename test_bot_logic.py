@@ -997,9 +997,14 @@ class StalePriceAlertTests(unittest.TestCase):
 
 
 class DashboardAuthTests(unittest.TestCase):
-    def _handler(self, auth_header=""):
+    def _handler(self, auth_header="", cookie=""):
         handler = bot.HealthCheckHandler.__new__(bot.HealthCheckHandler)
-        handler.headers = {"Authorization": auth_header} if auth_header else {}
+        headers = {}
+        if auth_header:
+            headers["Authorization"] = auth_header
+        if cookie:
+            headers["Cookie"] = cookie
+        handler.headers = headers
         return handler
 
     def test_open_when_password_unset(self):
@@ -1015,15 +1020,37 @@ class DashboardAuthTests(unittest.TestCase):
 
     def test_accepts_matching_basic_auth(self):
         token = base64.b64encode(b"user:secret").decode("ascii")
-        handler = self._handler(f"Basic {token}")
+        handler = self._handler(auth_header=f"Basic {token}")
         with patch.dict(os.environ, {"DASHBOARD_PASSWORD": "secret"}):
             self.assertTrue(handler._check_auth())
 
     def test_rejects_wrong_password(self):
         token = base64.b64encode(b"user:wrong").decode("ascii")
-        handler = self._handler(f"Basic {token}")
+        handler = self._handler(auth_header=f"Basic {token}")
         with patch.dict(os.environ, {"DASHBOARD_PASSWORD": "secret"}):
             self.assertFalse(handler._check_auth())
+
+    def test_accepts_matching_cookie(self):
+        token = bot._auth_cookie_token("secret")
+        handler = self._handler(cookie=f"{bot.AUTH_COOKIE_NAME}={token}")
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": "secret"}):
+            self.assertTrue(handler._check_auth())
+
+    def test_rejects_wrong_cookie(self):
+        handler = self._handler(cookie=f"{bot.AUTH_COOKIE_NAME}=deadbeef")
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": "secret"}):
+            self.assertFalse(handler._check_auth())
+
+    def test_login_page_has_password_form(self):
+        html = bot._render_login_page(error=False)
+        self.assertIn('name="password"', html)
+        self.assertIn('action="/login"', html)
+        self.assertIn("ใส่รหัสผ่าน", html)
+        self.assertNotIn("รหัสผ่านไม่ถูกต้อง", html)
+
+    def test_login_page_shows_error(self):
+        html = bot._render_login_page(error=True)
+        self.assertIn("รหัสผ่านไม่ถูกต้อง", html)
 
 
 if __name__ == "__main__":

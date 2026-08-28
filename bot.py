@@ -3120,6 +3120,93 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
 
 
 # ==================== Web Service (หน้าเว็บสถานะ + ควบคุมบอท สำหรับ Render) ====================
+AUTH_COOKIE_NAME = "sentinel_auth"
+AUTH_COOKIE_MAX_AGE_SEC = 30 * 24 * 3600
+AUTH_COOKIE_SALT = b"sentinel-dashboard-v1"
+
+
+def _passwords_match(given, required):
+    if not required:
+        return True
+    if given is None:
+        return False
+    try:
+        return hmac.compare_digest(str(given).encode("utf-8"), str(required).encode("utf-8"))
+    except Exception:
+        return False
+
+
+def _auth_cookie_token(password):
+    return hmac.new(str(password).encode("utf-8"), AUTH_COOKIE_SALT, hashlib.sha256).hexdigest()
+
+
+def _render_login_page(error=False):
+    err = (
+        '<div class="banner banner-danger">รหัสผ่านไม่ถูกต้อง ลองอีกครั้ง</div>'
+        if error else ""
+    )
+    return f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sentinel · ใส่รหัสผ่าน</title>
+<style>
+  :root {{
+    --bg: #1E1C18; --card: #2A2822; --border: #3D3A32;
+    --text: #EDE9DD; --text-soft: #9C9585;
+    --accent: #E08A65; --accent-soft: #3D2C22;
+    --red: #E08277; --red-soft: #3A2523;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{ margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased; min-height:100vh;
+    display:flex; justify-content:center; padding:0 20px; }}
+  .app {{ width:100%; max-width:420px; padding:48px 0 40px; }}
+  .brand {{ display:flex; align-items:center; gap:10px; margin-bottom:28px; }}
+  .spark {{ width:22px; height:22px; flex-shrink:0; }}
+  .spark path {{ fill: var(--accent); }}
+  .brand-title {{ font-size:15px; font-weight:700; }}
+  .brand-sub {{ font-size:12px; color:var(--text-soft); margin-top:1px; }}
+  .card {{ background:var(--card); border:1px solid var(--border); border-radius:16px; padding:20px; }}
+  h1 {{ font-size:18px; font-weight:700; margin:0 0 8px; }}
+  .hint {{ font-size:13px; color:var(--text-soft); line-height:1.5; margin:0 0 16px; }}
+  .banner {{ margin:0 0 14px; padding:12px 14px; border-radius:12px; font-size:13px;
+    font-weight:600; line-height:1.5; }}
+  .banner-danger {{ background:var(--red-soft); color:var(--red); }}
+  label {{ display:block; font-size:12px; font-weight:600; margin-bottom:8px; }}
+  input {{ width:100%; padding:14px 12px; border:1px solid var(--border); border-radius:10px;
+    font-size:16px; background:var(--bg); color:var(--text); }}
+  input:focus {{ outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }}
+  button {{ width:100%; margin-top:14px; border:none; border-radius:10px; padding:14px 16px;
+    font-size:15px; font-weight:700; background:var(--accent); color:#fff; cursor:pointer; }}
+</style>
+</head>
+<body>
+  <div class="app">
+    <div class="brand">
+      <svg class="spark" viewBox="0 0 24 24"><path d="M12 0c.6 3.8 2.2 6.4 5 8.2 2.8 1.8 5.4 2 7 2-1.6 0-4.2.2-7 2C14.2 14 12.6 16.6 12 20.4c-.6-3.8-2.2-6.4-5-8.2-2.8-1.8-5.4-2-7-2 1.6 0 4.2-.2 7-2C9.8 6.4 11.4 3.8 12 0z"/></svg>
+      <div>
+        <div class="brand-title">Sentinel</div>
+        <div class="brand-sub">หน้าควบคุมบอท</div>
+      </div>
+    </div>
+    {err}
+    <form class="card" method="POST" action="/login" autocomplete="on">
+      <h1>ใส่รหัสผ่าน</h1>
+      <p class="hint">มือถือมักไม่โชว์กล่องรหัสของเบราว์เซอร์ — พิมพ์ในช่องนี้ได้เลย รหัสเดียวกับที่ตั้งใน Render</p>
+      <label for="password">รหัสผ่าน</label>
+      <input id="password" name="password" type="password" autocomplete="current-password"
+        autocapitalize="off" autocorrect="off" spellcheck="false" required autofocus>
+      <button type="submit">เข้าสู่แดชบอร์ด</button>
+    </form>
+  </div>
+</body>
+</html>
+"""
+
+
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
@@ -3129,10 +3216,47 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
 
-    def _check_auth(self):
-        required = os.environ.get("DASHBOARD_PASSWORD")
+    def _request_path(self):
+        return (self.path or "/").split("?", 1)[0]
+
+    def _parse_cookies(self):
+        raw = self.headers.get("Cookie") or ""
+        out = {}
+        for part in raw.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name:
+                out[name] = urllib.parse.unquote(value)
+        return out
+
+    def _cookie_secure(self):
+        proto = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+        return proto == "https"
+
+    def _auth_cookie_header(self, password):
+        token = _auth_cookie_token(password)
+        parts = [
+            f"{AUTH_COOKIE_NAME}={token}",
+            "Path=/",
+            "HttpOnly",
+            "SameSite=Lax",
+            f"Max-Age={AUTH_COOKIE_MAX_AGE_SEC}",
+        ]
+        if self._cookie_secure():
+            parts.append("Secure")
+        return "; ".join(parts)
+
+    def _cookie_matches(self, required):
         if not required:
             return True
+        got = self._parse_cookies().get(AUTH_COOKIE_NAME, "")
+        if not got:
+            return False
+        try:
+            return hmac.compare_digest(got, _auth_cookie_token(required))
+        except Exception:
+            return False
+
+    def _basic_auth_matches(self, required):
         auth_header = self.headers.get("Authorization", "")
         if not auth_header.startswith("Basic "):
             return False
@@ -3141,19 +3265,27 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             _, _, pw = decoded.partition(":")
         except Exception:
             return False
-        try:
-            return hmac.compare_digest(pw.encode("utf-8"), required.encode("utf-8"))
-        except Exception:
-            return False
+        return _passwords_match(pw, required)
+
+    def _check_auth(self):
+        required = os.environ.get("DASHBOARD_PASSWORD")
+        if not required:
+            return True
+        return self._cookie_matches(required) or self._basic_auth_matches(required)
+
+    def _send_login_page(self, error=False):
+        html = _render_login_page(error=error)
+        # 200 ไม่ใช่ 401 และไม่ส่ง WWW-Authenticate — มือถือ/in-app browser มักบล็อกกล่อง Basic Auth
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(html.encode("utf-8"))
 
     def _require_auth(self):
         if self._check_auth():
             return True
-        self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="Sentinel"')
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write("ต้องใส่รหัสผ่าน".encode("utf-8"))
+        self._send_login_page(error=False)
         return False
 
     def do_GET(self):
@@ -3196,18 +3328,28 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length).decode("utf-8") if length else ""
             fields = urllib.parse.parse_qs(raw)
+            path = self._request_path()
 
             required_password = os.environ.get("DASHBOARD_PASSWORD")
             given_password = fields.get("password", [""])[0]
+            form_ok = bool(required_password) and _passwords_match(given_password, required_password)
 
-            if required_password and not hmac.compare_digest(
-                given_password.encode("utf-8"), required_password.encode("utf-8")
-            ):
-                self.send_response(403)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.end_headers()
-                self.wfile.write("รหัสผ่านไม่ถูกต้อง".encode("utf-8"))
+            if path == "/login":
+                if required_password and form_ok:
+                    self.send_response(303)
+                    self.send_header("Location", "/")
+                    self.send_header("Set-Cookie", self._auth_cookie_header(required_password))
+                    self.end_headers()
+                    return
+                self._send_login_page(error=True)
                 return
+
+            if required_password:
+                cookie_ok = self._cookie_matches(required_password)
+                basic_ok = self._basic_auth_matches(required_password)
+                if not (cookie_ok or basic_ok or form_ok):
+                    self._send_login_page(error=True)
+                    return
 
             if self.path == "/control/settings":
                 control = load_control()
@@ -3346,6 +3488,8 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
             self.send_response(303)
             self.send_header("Location", "/")
+            if required_password and form_ok:
+                self.send_header("Set-Cookie", self._auth_cookie_header(required_password))
             self.end_headers()
 
         except Exception as e:
