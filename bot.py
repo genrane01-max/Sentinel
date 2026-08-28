@@ -199,9 +199,9 @@ SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}$")
 KNOWN_QUOTE_SUFFIXES = ("THB", "USDT", "USD")
 # ซื้อตอนย่อ — จำยอดที่ขึ้น วัดย่อจากยอดนั้น ไม่ใช้หน้าต่างเวลา
 PULLBACK_MIN_IMPULSE_PERCENT = 1.2   # ขึ้นจากจุดต่ำอย่างน้อยเท่านี้ จึงนับว่าพุ่ง แล้วจำยอด
-PULLBACK_MIN_DIP_PERCENT = 0.5       # ย่อจากยอดที่จำไว้อย่างน้อยเท่านี้ จึงรอเด้งเข้าซื้อ
-PULLBACK_MAX_DIP_PERCENT = 1.5       # ย่อลึกกว่านี้ = โครงสร้างพัง ล้างยอด เริ่มใหม่
-PULLBACK_BOUNCE_PERCENT = 0.05       # เด้งจากจุดต่ำของย่ออย่างน้อยเท่านี้ถึงซื้อ (กันมีดตก)
+PULLBACK_MIN_DIP_PERCENT = 30       # ย่อจากยอดที่จำไว้อย่างน้อยเท่านี้ จึงรอเด้งเข้าซื้อ
+PULLBACK_MAX_DIP_PERCENT = 45       # ย่อลึกกว่านี้ = โครงสร้างพัง ล้างยอด เริ่มใหม่
+PULLBACK_BOUNCE_PERCENT = 1       # เด้งจากจุดต่ำของย่ออย่างน้อยเท่านี้ถึงซื้อ (กันมีดตก)
 MAX_SPREAD_PERCENT = 0.53            # ไม่ซื้อถ้า (ask-bid)/mid กว้างเกินนี้ (%)
 SWING_RESET = {
     "swing_low": 0.0,      # จุดเริ่มพุ่ง (trough)
