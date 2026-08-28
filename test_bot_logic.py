@@ -891,6 +891,72 @@ class PullbackEntryTests(unittest.TestCase):
         self.assertFalse(sig["should_buy"])
         self.assertEqual(sig["reason"], "waiting_impulse")
 
+    def test_history_low_is_impulse_origin_before_surge(self):
+        # บอทเพิ่งเริ่มเฝ้าตอนราคา 100.9 แต่ประวัติมีจุดถูก 100 ก่อนพุ่ง
+        hist = [[1, 100.0], [2, 100.3], [3, 100.6]]
+        sig = bot.apply_pullback_tick(100.9, {}, history=hist)
+        self.assertAlmostEqual(sig["swing_low"], 100.0)
+        self.assertTrue(sig["entry_armed"])
+        self.assertAlmostEqual(sig["swing_high"], 100.9)
+        self.assertGreaterEqual(sig["impulse_pct"], bot.PULLBACK_MIN_IMPULSE_PERCENT)
+
+    def test_history_low_does_not_raise_trough(self):
+        # จุดต่ำที่จำไว้ถูกกว่าประวัติ — ต้องไม่ถูกดึงขึ้น
+        hist = [[1, 101.0], [2, 101.2]]
+        sig = bot.apply_pullback_tick(101.1, {"swing_low": 100.0}, history=hist)
+        self.assertAlmostEqual(sig["swing_low"], 100.0)
+        self.assertTrue(sig["entry_armed"])
+
+    def test_live_price_can_set_new_cheaper_origin(self):
+        hist = [[1, 100.0]]
+        sig = bot.apply_pullback_tick(99.0, {"swing_low": 100.0}, history=hist)
+        self.assertAlmostEqual(sig["swing_low"], 99.0)
+        self.assertFalse(sig["entry_armed"])
+        self.assertEqual(sig["reason"], "waiting_impulse")
+
+    def test_armed_peak_does_not_move_origin(self):
+        # ติดอาวุธแล้ว จุดตั้งต้นต้องคงที่แม้ประวัติจะมีจุดต่ำกว่า
+        remembered = {
+            "swing_low": 100.0,
+            "swing_high": 101.5,
+            "pullback_low": 101.5,
+            "entry_armed": True,
+        }
+        hist = [[1, 99.0], [2, 101.5]]
+        sig = bot.apply_pullback_tick(101.2, remembered, history=hist)
+        self.assertAlmostEqual(sig["swing_low"], 100.0)
+        self.assertTrue(sig["entry_armed"])
+
+    def test_dashboard_waiting_card_shows_cheap_point_progress(self):
+        state = {
+            "status": "IDLE",
+            "swing_low": 100.0,
+            "swing_high": 0.0,
+            "pullback_low": 0.0,
+            "entry_armed": False,
+            "price_history": [[time.time(), 100.4]],
+        }
+        html = bot.render_dashboard(
+            ["BTCTHB"],
+            {"BTCTHB": state},
+            {
+                "watchlist": ["BTCTHB"],
+                "paused": False,
+                "max_open_positions": 3,
+                "max_consecutive_losses": 3,
+                "max_daily_loss_percent": 5,
+                "trade_size_percent": 30,
+                "trailing_stop_percent": 1,
+                "stop_loss_percent": 3,
+            },
+            {},
+        )
+        self.assertIn("จุดตั้งต้น", html)
+        self.assertIn("ราคาถูกก่อนพุ่ง", html)
+        self.assertIn("จุดต่ำ", html)
+        self.assertIn("ขึ้นจากจุดต่ำ", html)
+        self.assertNotIn("width:8%", html)
+
     def test_no_time_window_required(self):
         # สองติ๊กก็ซื้อได้ ถ้าขึ้น-ย่อ-เด้งครบ ไม่ต้องรอ 2 ชม.
         sig, _ = walk([100.0, 101.0, 100.4, 100.55])

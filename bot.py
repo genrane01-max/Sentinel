@@ -363,7 +363,20 @@ def quote_mark_price(quote, side="last"):
     return quote.get("last") or quote.get("mid") or quote.get("ask") or quote.get("bid")
 
 
-def apply_pullback_tick(price, swing=None):
+def _history_low(history):
+    """จุดต่ำสุดในประวัติราคาต่อเนื่อง — ใช้เป็นจุดตั้งต้นก่อนพุ่ง ถ้าบอทยังไม่ติดอาวุธ"""
+    low = 0.0
+    for row in history or []:
+        try:
+            px = float(row[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if px > 0 and (low <= 0 or px < low):
+            low = px
+    return low
+
+
+def apply_pullback_tick(price, swing=None, history=None):
     """จำยอดที่ราคาขึ้น แล้ววัดว่าย่อจากยอดนั้นเท่าไร — ไม่ใช้หน้าต่าง 1/2/3 ชม.
 
     ลำดับ:
@@ -372,6 +385,9 @@ def apply_pullback_tick(price, swing=None):
       3) ย่อจากยอดในช่วงที่กำหนด → รอเด้ง
       4) เด้งจากจุดต่ำของย่อ → ซื้อ
       5) ย่อลึกเกิน / หลุดจุดเริ่มพุ่ง → ล้างยอด เริ่มใหม่
+
+    จุดต่ำ (swing_low) คือจุดตั้งต้นก่อนพุ่ง: จำราคาถูกที่สุดที่เห็น
+    (จาก state + ประวัติราคา) จนกว่าจะติดอาวุธ แล้วไม่เลื่อนขึ้นตามราคา
     """
     swing = swing or {}
     result = {
@@ -402,6 +418,9 @@ def apply_pullback_tick(price, swing=None):
     if not armed:
         if trough <= 0 or price < trough:
             trough = price
+        hist_low = _history_low(history)
+        if hist_low > 0 and hist_low < trough:
+            trough = hist_low
         impulse = ((price - trough) / trough * 100.0) if trough > 0 else 0.0
         result["impulse_pct"] = impulse
         if impulse >= PULLBACK_MIN_IMPULSE_PERCENT:
@@ -1939,7 +1958,11 @@ class InnovestXTradingBot:
             empty["reason"] = "no_price"
             return empty
 
-        signal = apply_pullback_tick(current_price, self._swing_from_state())
+        signal = apply_pullback_tick(
+            current_price,
+            self._swing_from_state(),
+            self.state.get("price_history"),
+        )
         new_swing = swing_fields_from_signal(signal)
         changed = any(self.state.get(k) != v for k, v in new_swing.items())
         self.state.update(new_swing)
@@ -2691,7 +2714,7 @@ def _trend_from_state(state):
         "pullback_low": float(state.get("pullback_low") or 0.0),
         "entry_armed": bool(state.get("entry_armed")),
     }
-    signal = apply_pullback_tick(current, swing)
+    signal = apply_pullback_tick(current, swing, history)
     signal["current"] = current
     signal["elapsed"] = empty["elapsed"]
     return signal
@@ -2890,13 +2913,39 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
                 "</section>"
             )
         elif waiting_impulse:
-            progress_html = (
-                '<section class="progress-card">'
-                '<div class="progress-label">รอราคาขึ้นพอเพื่อจำยอด — ยังไม่ซื้อ</div>'
-                '<div class="progress-bar"><div class="progress-fill" style="width:8%"></div></div>'
-                f'<div class="progress-sub">ขึ้นจากจุดต่ำอย่างน้อย {PULLBACK_MIN_IMPULSE_PERCENT}% แล้วจะจำยอด รอย่อ ค่อยซื้อ</div>'
-                "</section>"
-            )
+            best_wait = None
+            for sym in watchlist:
+                st = states_by_symbol.get(sym) or {}
+                if st.get("status") == "HOLDING":
+                    continue
+                tr = _trend_from_state(st)
+                if tr.get("entry_armed") or tr.get("phase") in ("armed", "pullback", "bounce"):
+                    continue
+                impulse = float(tr.get("impulse_pct") or 0.0)
+                trough = float(tr.get("swing_low") or 0.0)
+                if best_wait is None or impulse > best_wait[2]:
+                    best_wait = (sym, tr, impulse, trough)
+            if best_wait:
+                sym, tr, impulse, trough = best_wait
+                pct = min(92, max(8, (impulse / PULLBACK_MIN_IMPULSE_PERCENT * 100.0) if PULLBACK_MIN_IMPULSE_PERCENT else 8))
+                remain = max(0.0, PULLBACK_MIN_IMPULSE_PERCENT - impulse)
+                trough_txt = _fmt_thb(trough) if trough else "—"
+                progress_html = (
+                    '<section class="progress-card">'
+                    f'<div class="progress-label">{_display_symbol(sym)} ขึ้นจากจุดต่ำ {impulse:.2f}% — ยังไม่จำยอด</div>'
+                    f'<div class="progress-bar"><div class="progress-fill" style="width:{pct:.0f}%"></div></div>'
+                    f'<div class="progress-sub">จุดตั้งต้น {trough_txt} ฿ (ราคาถูกก่อนพุ่ง) · '
+                    f"เป้า {PULLBACK_MIN_IMPULSE_PERCENT}% อีก {remain:.2f}% จะจำยอด รอย่อ ค่อยซื้อ</div>"
+                    "</section>"
+                )
+            else:
+                progress_html = (
+                    '<section class="progress-card">'
+                    '<div class="progress-label">รอราคาขึ้นพอเพื่อจำยอด — ยังไม่ซื้อ</div>'
+                    '<div class="progress-bar"><div class="progress-fill" style="width:8%"></div></div>'
+                    f'<div class="progress-sub">ขึ้นจากจุดต่ำอย่างน้อย {PULLBACK_MIN_IMPULSE_PERCENT}% แล้วจะจำยอด รอย่อ ค่อยซื้อ</div>'
+                    "</section>"
+                )
 
     control_cards_html = "".join([
         _render_card(
@@ -2937,6 +2986,7 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         impulse_pct = trend.get("impulse_pct")
         bounce_pct = trend.get("bounce_pct")
         swing_high = float(trend.get("swing_high") or 0.0)
+        swing_low = float(trend.get("swing_low") or 0.0)
         is_paused = sym in paused_set
         holding_cls = " is-holding" if status == "HOLDING" else ""
         if is_paused:
@@ -2971,9 +3021,11 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
                 chips.append('<span class="chip">จำยอดแล้ว รอว่าราคาย่อ</span>')
             else:
                 chips.append('<span class="chip">รอพุ่งเพื่อจำยอด</span>')
+        if swing_low and status != "HOLDING":
+            chips.append(f'<span class="chip">จุดต่ำ {_fmt_thb(swing_low)}</span>')
         if swing_high and status != "HOLDING":
             chips.append(f'<span class="chip">ยอดที่จำ {_fmt_thb(swing_high)}</span>')
-        if impulse_pct:
+        if impulse_pct is not None and status != "HOLDING":
             chips.append(f'<span class="chip {"up" if impulse_pct >= 0 else "down"}">ขึ้นมา {impulse_pct:+.2f}%</span>')
         if dip_pct:
             chips.append(f'<span class="chip {"down" if dip_pct > 0 else ""}">ย่อ {dip_pct:.2f}%</span>')
@@ -3010,7 +3062,13 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
                     "ผ่านเกณฑ์ซื้อตอนย่อ — รอช่องว่างเพื่อเข้าซื้อ"
                 )
             elif reason_th:
-                sub = reason_th
+                if swing_low and trend.get("reason") == "waiting_impulse":
+                    sub = (
+                        f"{reason_th} · จุดตั้งต้น {_fmt_thb(swing_low)} ฿ "
+                        f"(ราคาถูกก่อนพุ่ง)"
+                    )
+                else:
+                    sub = reason_th
             else:
                 sub = (
                     f"จำยอดแล้วรอย่อ {PULLBACK_MIN_DIP_PERCENT}–{PULLBACK_MAX_DIP_PERCENT}% "
