@@ -158,38 +158,46 @@ class WatchlistTests(unittest.TestCase):
 
 
 class EntrySignalTests(unittest.TestCase):
-    def test_buy_when_two_hours_up(self):
-        # now=107, 1h=100 (+7% would chase) — use modest move
-        # 1h: 100.8 / 100 = +0.8%, 2h: 100/99.2 = +0.81%, net 100.8/99.2 = +1.61%
-        sig = bot.evaluate_entry_signal(100.8, 100.0, 99.2, 99.0)
+    def test_buy_on_pullback_after_up_hour(self):
+        # ชม.2 +1.61%, ชม.1 -0.79%, สุทธิ +0.81%
+        sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 99.0)
         self.assertTrue(sig["should_buy"])
+        self.assertEqual(sig["direction"], "up")
         self.assertEqual(sig["confidence"], 100)
+        self.assertIsNone(sig["reason"])
+
+    def test_does_not_chase_while_still_rising(self):
+        # ของเดิมซื้อเคสนี้ — ตอนนี้รอย่อ
+        sig = bot.evaluate_entry_signal(100.8, 100.0, 99.2, 99.0)
+        self.assertFalse(sig["should_buy"])
+        self.assertEqual(sig["reason"], "waiting_pullback")
+        self.assertEqual(sig["direction"], "up")
 
     def test_hour3_veto(self):
-        sig = bot.evaluate_entry_signal(100.8, 100.0, 99.2, 101.0)  # hour3 = 99.2/101 = -1.78%
+        sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 101.0)  # hour3 = 99.2/101 = -1.78%
         self.assertFalse(sig["should_buy"])
         self.assertTrue(sig["vetoed"])
         self.assertEqual(sig["reason"], "hour3_veto")
 
     def test_hour2_down_blocks(self):
-        sig = bot.evaluate_entry_signal(101.0, 100.0, 101.0, 100.0)
+        sig = bot.evaluate_entry_signal(99.5, 100.5, 101.0, 100.0)
         self.assertFalse(sig["should_buy"])
         self.assertEqual(sig["reason"], "hour2_down")
-        self.assertEqual(sig["confidence"], 10)
 
-    def test_min_confidence_80_allows_weak_net(self):
-        # ชม.1 +0.55%, ชม.2 +0.10%, สุทธิ +0.65% < 0.7% → คะแนน 80
-        sig = bot.evaluate_entry_signal(100.55, 100.0, 99.90, 99.0)
-        self.assertEqual(sig["confidence"], 80)
+    def test_deep_pullback_blocks(self):
+        # ชม.2 +2.0%, ชม.1 -2.5%
+        sig = bot.evaluate_entry_signal(97.5, 100.0, 98.04, 98.0)
+        self.assertFalse(sig["should_buy"])
+        self.assertEqual(sig["reason"], "deep_pullback")
+
+    def test_still_falling_15m_blocks(self):
+        sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 99.0, price_15m_ago=100.4)
+        self.assertFalse(sig["should_buy"])
+        self.assertEqual(sig["reason"], "still_falling")
+
+    def test_bounce_15m_allows_buy(self):
+        sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 99.0, price_15m_ago=99.85)
         self.assertTrue(sig["should_buy"])
-        self.assertIsNone(sig["reason"])
-
-    def test_min_confidence_100_blocks_weak_net(self):
-        with patch.object(bot, "MIN_CONFIDENCE_TO_BUY", 100):
-            sig = bot.evaluate_entry_signal(100.55, 100.0, 99.90, 99.0)
-            self.assertEqual(sig["confidence"], 80)
-            self.assertFalse(sig["should_buy"])
-            self.assertEqual(sig["reason"], "weak_net")
 
 
 class SafeFloatTests(unittest.TestCase):

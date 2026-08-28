@@ -3,7 +3,7 @@ InnovestX Automated Trading Bot — Price Action 2H Strategy
 (v7, เข้าซื้อด้วย 2 ชม.เป็นหลัก / ชม.3 ห้ามซื้อถ้าลงแรง / bid-offer ลงฐานที่ 2)
 
 ของใหม่ในเวอร์ชันนี้:
-1. สูตรเข้าซื้อใช้ 2 ชั่วโมงเป็นหลัก (ชม.1 + ชม.2 ต้องขึ้น, สุทธิ 2 ชม. ต้องบวก)
+1. สูตรเข้าซื้อ: ชม.2 ขึ้นแล้ว ชม.1 ย่อ — ไม่ไล่ซื้อตอนยังพุ่ง
 2. ชม.ที่ 3 ไม่ยืนยันซื้อแล้ว — ใช้แค่ห้ามซื้อถ้าลงแรงเกิน −1.5%
 3. แยก Firebase: ฐานหลัก = สถานะเทรด/ตั้งค่า, ฐานที่ 2 = bid/offer + ประวัติราคา
 4. ตัดสินใจซื้อเทียบ offer (ask), ขายเทียบ bid, กันสเปรดกว้าง
@@ -195,14 +195,14 @@ STOP_ALL = {"value": False}
 SHARED_RISK_PATH = "bots/_shared/risk"
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}$")
 KNOWN_QUOTE_SUFFIXES = ("THB", "USDT", "USD")
-# เข้าซื้อด้วย 2 ชม.เป็นหลัก — ชม.3 ใช้แค่ห้ามซื้อ ไม่เอามายืนยัน
-MIN_CHANGE_1H_PERCENT = 0.5      # ชม.ล่าสุดต้องขึ้นอย่างน้อยเท่านี้ (สูงกว่าค่าฟี ~0.4%)
-MIN_NET_2H_PERCENT = 0.7         # สุทธิ 2 ชม. ต้องบวกจริง
-MAX_CHANGE_1H_PERCENT = 2.5      # ชม.ล่าสุดพุ่งเกินนี้ = ไล่หัว ไม่ซื้อ
+# เข้าซื้อแบบขึ้นแล้วย่อ — ไม่ไล่ซื้อตอนชม.ล่าสุดยังพุ่ง
+MIN_TREND_2H_PERCENT = 0.7       # ชม.ก่อนหน้า (ขาขึ้น) ต้องขึ้นอย่างน้อยเท่านี้
+MIN_PULLBACK_1H_PERCENT = 0.3    # ชม.ล่าสุดต้องย่ออย่างน้อยเท่านี้
+MAX_PULLBACK_1H_PERCENT = 1.8    # ย่อลึกกว่านี้ = เทรนด์อาจพัง ไม่ซื้อ
+MIN_NET_2H_PERCENT = 0.4         # หลังย่อแล้ว สุทธิ 2 ชม. ยังบวก
 HOUR3_VETO_PERCENT = -1.5        # ชม.3 ลงแรงกว่านี้ = ขาลงใหญ่ยังไม่จบ ห้ามซื้อ
-# คะแนนสะสม: ชม.1 ผ่าน +50, ชม.2 ขึ้น +30, สุทธิ 2 ชม.ผ่าน +20, ชม.2 ลงหักเหลือ ~10
-# ซื้อเมื่อ confidence >= MIN_CONFIDENCE_TO_BUY และไม่โดน veto (ไล่หัว / ชม.3 ลงแรง)
-MIN_CONFIDENCE_TO_BUY = 80
+# คะแนน: ชม.2 ขึ้นพอ +50, ย่อในกรอบ +30, สุทธิ 2 ชม.ยังบวก +20
+MIN_CONFIDENCE_TO_BUY = 100
 MAX_SPREAD_PERCENT = 0.53            # ไม่ซื้อถ้า (ask-bid)/mid กว้างเกินนี้ (%)
 GRADUAL_WINDOW_MINUTES = 60          # ดูย้อนหลังกี่นาทีเพื่อหาจังหวะขยับทีละนิดก่อนพุ่ง
 GRADUAL_BUCKET_MINUTES = 10          # แบ่งหน้าต่างเป็นช่วงละกี่นาที (60/10 = 6 ช่วง)
@@ -366,12 +366,12 @@ def quote_mark_price(quote, side="last"):
     return quote.get("last") or quote.get("mid") or quote.get("ask") or quote.get("bid")
 
 
-def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ago=None):
-    """ตัดสินใจซื้อด้วย 2 ชม.เป็นหลัก ชม.3 ใช้แค่ห้ามซื้อถ้าลงแรง
+def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ago=None,
+                          price_15m_ago=None):
+    """ซื้อตอนขึ้นแล้วย่อ — ชม.2 เป็นขาขึ้น ชม.1 ย่อในกรอบ สุทธิ 2 ชม.ยังบวก
 
-    คะแนน: ชม.1 ขึ้นพอ +50, ชม.2 ขึ้น +30, สุทธิ 2 ชม.พอ +20
-    ชม.2 ลงหักเหลือ ~10 / ชม.1 อ่อน = 0 / ไล่หัว / ชม.3 ลงแรง → ไม่ซื้อ
-    ซื้อเมื่อ confidence >= MIN_CONFIDENCE_TO_BUY และไม่โดน veto
+    ไม่ซื้อตอนชม.ล่าสุดยังพุ่ง (ไล่หัว) และไม่ซื้อถ้าย่อลึกจนเทรนด์พัง
+    ถ้ามีราคา 15 นาทีย้อนหลัง และยังลงต่อ จะรอปุ่มก่อน
     """
     result = {
         "direction": None,
@@ -397,57 +397,57 @@ def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ag
     result["change_3h"] = change_3h
     result["net_2h"] = net_2h
 
-    if change_1h is None or change_1h == 0:
-        result["reason"] = "flat"
-        return result
-
-    direction = "up" if change_1h > 0 else "down"
-    result["direction"] = direction
-    if direction == "down":
-        result["reason"] = "down"
-        return result
-
-    if price_2h_ago is None:
+    if price_2h_ago is None or change_2h is None:
         result["reason"] = "gap"
         return result
 
-    confidence = 0
-    reason = None
-
-    if change_1h >= MIN_CHANGE_1H_PERCENT:
-        confidence += 50
-    else:
-        reason = "weak_1h"
-
-    if change_1h > MAX_CHANGE_1H_PERCENT:
-        result["confidence"] = confidence
-        result["reason"] = "chase"
+    if change_2h < MIN_TREND_2H_PERCENT:
+        result["direction"] = "down" if change_2h <= 0 else "up"
+        result["reason"] = "hour2_down" if change_2h <= 0 else "weak_trend"
         return result
 
-    if change_2h is None:
-        result["confidence"] = confidence
-        result["reason"] = "gap"
-        return result
-    if change_2h <= 0:
-        confidence = max(0, confidence - 40)
-        reason = "hour2_down"
-    else:
-        confidence += 30
-
-    if net_2h is not None and net_2h >= MIN_NET_2H_PERCENT:
-        confidence += 20
-    elif reason is None:
-        reason = "weak_net"
+    result["direction"] = "up"
 
     if change_3h is not None and change_3h < HOUR3_VETO_PERCENT:
-        result["confidence"] = confidence
         result["vetoed"] = True
         result["reason"] = "hour3_veto"
         return result
 
+    if change_1h is None:
+        result["reason"] = "gap"
+        return result
+
+    if change_1h >= 0:
+        result["confidence"] = 50
+        result["reason"] = "waiting_pullback"
+        return result
+
+    pullback = -change_1h
+    if pullback < MIN_PULLBACK_1H_PERCENT:
+        result["confidence"] = 50
+        result["reason"] = "shallow_pullback"
+        return result
+    if pullback > MAX_PULLBACK_1H_PERCENT:
+        result["reason"] = "deep_pullback"
+        return result
+
+    confidence = 80
+    if net_2h is None or net_2h < MIN_NET_2H_PERCENT:
+        result["confidence"] = confidence
+        result["reason"] = "weak_net"
+        return result
+    confidence = 100
+
+    if price_15m_ago:
+        change_15m = _pct_change(current_price, price_15m_ago)
+        if change_15m is not None and change_15m < 0:
+            result["confidence"] = confidence
+            result["reason"] = "still_falling"
+            return result
+
     result["confidence"] = confidence
     result["should_buy"] = confidence >= MIN_CONFIDENCE_TO_BUY
-    result["reason"] = None if result["should_buy"] else (reason or "weak")
+    result["reason"] = None if result["should_buy"] else "weak"
     return result
 
 
@@ -911,12 +911,15 @@ def install_shutdown_handlers():
 REASON_TH = {
     "no_price": "ยังไม่มีราคา",
     "flat": "ราคานิ่ง",
-    "down": "ชม.ล่าสุดลง — ไม่ซื้อ",
+    "down": "ชม.ล่าสุดลง แต่ยังไม่ใช่จังหวะย่อในขาขึ้น",
     "gap": "ข้อมูลราคาขาดช่วง",
-    "weak_1h": f"ชม.ล่าสุดขึ้นไม่ถึง {MIN_CHANGE_1H_PERCENT}%",
-    "chase": f"ชม.ล่าสุดพุ่งเกิน {MAX_CHANGE_1H_PERCENT}% — กันไล่หัว",
-    "hour2_down": "ชม.ก่อนหน้าลง — หักลบแล้วไม่ซื้อ",
-    "weak_net": f"สุทธิ 2 ชม. ยังไม่ถึง +{MIN_NET_2H_PERCENT}%",
+    "waiting_pullback": "ขาขึ้นอยู่ รอย่อก่อนซื้อ — ไม่ไล่หัว",
+    "shallow_pullback": f"ย่อยังไม่ถึง {MIN_PULLBACK_1H_PERCENT}% รอให้ย่อกว่านี้",
+    "deep_pullback": f"ย่อลึกกว่า {MAX_PULLBACK_1H_PERCENT}% — เทรนด์อาจพัง ไม่ซื้อ",
+    "still_falling": "ย่อต่ออยู่ รอปุ่มก่อนซื้อ",
+    "weak_trend": f"ชม.ก่อนหน้าขึ้นไม่ถึง {MIN_TREND_2H_PERCENT}% — ยังไม่ใช่ขาขึ้นชัด",
+    "hour2_down": "ชม.ก่อนหน้าลง — ไม่มีขาขึ้นให้ย่อ",
+    "weak_net": f"หลังย่อแล้ว สุทธิ 2 ชม. ยังไม่ถึง +{MIN_NET_2H_PERCENT}%",
     "hour3_veto": f"ชม.3 ลงแรงกว่า {HOUR3_VETO_PERCENT}% — ห้ามซื้อ",
     "wide_spread": f"สเปรดกว้างเกิน {MAX_SPREAD_PERCENT}% — ไม่ซื้อ",
     "weak": "คะแนนยังไม่ถึงเกณฑ์",
@@ -2001,16 +2004,17 @@ class InnovestXTradingBot:
         price_1h_ago = self._price_at_offset(3600)
         price_2h_ago = self._price_at_offset(7200)
         price_3h_ago = self._price_at_offset(10800)
+        price_15m_ago = self._price_at_offset(900)
 
-        # evaluate_entry_signal จัดการค่า None ให้เองอยู่แล้ว (ถ้ายังไม่มีข้อมูล 2 ชม. จะแค่ไม่ผ่านทาง "ยืนยันแล้ว")
-        signal = evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ago)
+        signal = evaluate_entry_signal(
+            current_price, price_1h_ago, price_2h_ago, price_3h_ago,
+            price_15m_ago=price_15m_ago,
+        )
         gradual = detect_gradual_climb(self.state.get("price_history") or [])
 
         hour3_veto = signal.get("change_3h") is not None and signal["change_3h"] < HOUR3_VETO_PERCENT
-        gradual_should_buy = gradual["is_gradual"] and not hour3_veto
-
-        should_buy = signal["should_buy"] or gradual_should_buy
-        entry_path = "confirmed" if signal["should_buy"] else ("gradual" if gradual_should_buy else None)
+        should_buy = bool(signal["should_buy"]) and not hour3_veto
+        entry_path = "pullback" if should_buy else None
 
         quote = self.state.get("quote") or {}
         spread = quote.get("spread_pct")
@@ -2024,8 +2028,6 @@ class InnovestXTradingBot:
             )
 
         confidence = signal["confidence"]
-        if entry_path == "gradual":
-            confidence = max(confidence, 60)
 
         reason = None if should_buy else (
             signal["reason"] if signal["reason"] not in (None, "unknown") else gradual["reason"]
@@ -2036,15 +2038,14 @@ class InnovestXTradingBot:
         gradual_txt = f"{gradual['total_change']:+.2f}%" if gradual.get("total_change") is not None else "n/a"
 
         logger.info(
-            f"[{self.symbol}] ยืนยัน 1-2ชม.: {signal['direction'] or 'flat'} (คะแนน {signal['confidence']}%) "
+            f"[{self.symbol}] ขาขึ้นแล้วย่อ: {signal['direction'] or 'flat'} (คะแนน {signal['confidence']}%) "
             f"ชม.1 {signal['change_1h']:+.2f}% ชม.2 {h2_txt} สุทธิ {net_txt} | "
             f"ขยับทีละนิด 60นาที: {gradual_txt} ({'ผ่าน' if gradual['is_gradual'] else gradual_reason_th or 'ยังไม่ผ่าน'})"
         )
         if should_buy:
-            path_txt = "ยืนยันแล้ว (1-2ชม.)" if entry_path == "confirmed" else "ขยับทีละนิดก่อนพุ่ง"
-            logger.info(f"[{self.symbol}] ผ่านเกณฑ์เข้าซื้อ — ทาง: {path_txt}")
+            logger.info(f"[{self.symbol}] ผ่านเกณฑ์เข้าซื้อ — ขึ้นแล้วย่อ")
         else:
-            logger.info(f"[{self.symbol}] ไม่เข้าซื้อ — {REASON_TH.get(reason, reason or 'พร้อมซื้อ')}")
+            logger.info(f"[{self.symbol}] ไม่เข้าซื้อ — {REASON_TH.get(reason, reason or 'รอจังหวะ')}")
 
         return {
             "ready": True, "should_buy": should_buy, "direction": signal["direction"],
@@ -2730,18 +2731,16 @@ def _trend_from_state(state):
     p1 = price_at(3600)
     p2 = price_at(7200)
     p3 = price_at(10800)
+    p15 = price_at(900)
 
-    signal = evaluate_entry_signal(current, p1, p2, p3)
+    signal = evaluate_entry_signal(current, p1, p2, p3, price_15m_ago=p15)
     gradual = detect_gradual_climb(history, now=now)
 
     hour3_veto = signal.get("change_3h") is not None and signal["change_3h"] < HOUR3_VETO_PERCENT
-    gradual_should_buy = gradual["is_gradual"] and not hour3_veto
-    should_buy = signal["should_buy"] or gradual_should_buy
-    entry_path = "confirmed" if signal["should_buy"] else ("gradual" if gradual_should_buy else None)
+    should_buy = bool(signal["should_buy"]) and not hour3_veto
+    entry_path = "pullback" if should_buy else None
 
     confidence = signal["confidence"]
-    if entry_path == "gradual":
-        confidence = max(confidence, 60)
 
     reason = None if should_buy else (
         signal["reason"] if signal["reason"] not in (None, "unknown") else gradual["reason"]
@@ -3011,7 +3010,9 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         elif not is_paused:
             chips.append('<span class="chip" >เฝ้าอยู่</span>')
         if trend.get("should_buy") and status != "HOLDING" and not is_paused:
-            chips.append('<span class="chip up">พร้อมซื้อ</span>')
+            chips.append('<span class="chip up">ย่อแล้ว พร้อมซื้อ</span>')
+        elif trend.get("reason") == "waiting_pullback":
+            chips.append('<span class="chip">ขาขึ้น รอย่อ</span>')
         elif trend.get("vetoed"):
             chips.append('<span class="chip down">ชม.3 ห้ามซื้อ</span>')
         if direction == "up":
@@ -3051,11 +3052,15 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
         else:
             reason_th = REASON_TH.get(trend.get("reason"), "")
             if trend.get("should_buy"):
-                sub = "ผ่านเกณฑ์ 2 ชม. — รอช่องว่างเพื่อเข้าซื้อ"
+                sub = "ขึ้นแล้วย่อ — รอช่องว่างเพื่อเข้าซื้อ"
             elif reason_th:
                 sub = reason_th
             else:
-                sub = f"เกณฑ์: ชม.1 ≥ {MIN_CHANGE_1H_PERCENT}% และชม.2 ขึ้น, สุทธิ 2 ชม. ≥ {MIN_NET_2H_PERCENT}%"
+                sub = (
+                    f"เกณฑ์: ชม.2 ขึ้น ≥ {MIN_TREND_2H_PERCENT}% แล้วชม.1 ย่อ "
+                    f"{MIN_PULLBACK_1H_PERCENT}–{MAX_PULLBACK_1H_PERCENT}% "
+                    f"สุทธิ 2 ชม. ยัง ≥ {MIN_NET_2H_PERCENT}%"
+                )
         if is_paused:
             watch_btn = '<button type="submit" name="action" value="resume" class="btn btn-sm btn-accent">เฝ้าต่อ</button>'
         else:
