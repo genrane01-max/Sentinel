@@ -198,7 +198,7 @@ SHARED_RISK_PATH = "bots/_shared/risk"
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}$")
 KNOWN_QUOTE_SUFFIXES = ("THB", "USDT", "USD")
 # ซื้อตอนย่อ — จำยอดที่ขึ้น วัดย่อจากยอดนั้น ไม่ใช้หน้าต่างเวลา
-PULLBACK_MIN_IMPULSE_PERCENT = 0.8   # ขึ้นจากจุดต่ำอย่างน้อยเท่านี้ จึงนับว่าพุ่ง แล้วจำยอด
+PULLBACK_MIN_IMPULSE_PERCENT = 1.2   # ขึ้นจากจุดต่ำอย่างน้อยเท่านี้ จึงนับว่าพุ่ง แล้วจำยอด
 PULLBACK_MIN_DIP_PERCENT = 0.5       # ย่อจากยอดที่จำไว้อย่างน้อยเท่านี้ จึงรอเด้งเข้าซื้อ
 PULLBACK_MAX_DIP_PERCENT = 1.5       # ย่อลึกกว่านี้ = โครงสร้างพัง ล้างยอด เริ่มใหม่
 PULLBACK_BOUNCE_PERCENT = 0.05       # เด้งจากจุดต่ำของย่ออย่างน้อยเท่านี้ถึงซื้อ (กันมีดตก)
@@ -218,7 +218,7 @@ REVERSAL_COOLDOWN_MINUTES = 10       # ขายด้วยสัญญาณ�
 ORDER_SEND_PATH = "/api/v1/digital-asset/order/send"
 RECENT_ORDER_LOOKBACK_SEC = 180
 MARKET_HISTORY_FLUSH_SEC = 15
-PRICE_TICK_MIN_INTERVAL_SEC = 10
+PRICE_TICK_MIN_INTERVAL_SEC = 5
 PRICE_TICK_MIN_MOVE_PERCENT = 0.05
 HISTORY_NEEDED_SEC = 7200          # ไม่ใช้กันซื้อแล้ว เก็บไว้แค่คำนวณแถบประวัติถ้ามี
 HISTORY_KEEP_SEC = 10800           # เก็บย้อนหลัง 3 ชม. (ใช้ตอนขายด้วยสัญญาณกลับตัว)
@@ -3656,7 +3656,7 @@ if __name__ == "__main__":
     health_thread.start()
     logger.info("เปิด /health แล้ว กำลังเชื่อม Firebase — ถ้าเชื่อมช้า Render จะไม่คิดว่าเครื่องตาย")
 
-    POLL_INTERVAL_SEC = 10
+    POLL_INTERVAL_SEC = 5
 
     control = wait_for_fresh_control()
     if _CONTROL_CACHE.get("fresh") and not control.get("_uninitialized"):
