@@ -10,7 +10,7 @@ InnovestX Automated Trading Bot — Price Action 2H Strategy
 5. แดชบอร์ดใช้สูตรเดียวกับบอท
 6. มีเหรียญแต่ยืนยันราคาจับคู่ไม่ได้ — ถือต่อทันทีด้วยต้นทุนประมาณ แล้วขาย/trailing ได้เลย ไม่รอปลดจากเว็บ
 7. แจ้งเตือน Telegram + หยุดเฝ้าต่อเหรียญหลังตัดขาดทุน (กดเฝ้าต่อเองจากหน้าเว็บ)
-8. สัญญาณกลับตัวล็อกกำไรเหนือจุดคุ้มทุน โดยไม่ต้องรอ trailing arm — แล้วคูลดาวน์ 20 นาทีก่อนซื้อเหรียญนี้คืน
+8. สัญญาณกลับตัวล็อกกำไรเหนือจุดคุ้มทุน โดยไม่ต้องรอ trailing arm — แล้วคูลดาวน์ 10 นาทีก่อนซื้อเหรียญนี้คืน
 
 ของเดิมยังอยู่ครบ: แดชบอร์ด, หยุด/เริ่มเทรด, รหัสผ่าน, % ขาดทุนต่อวัน, อัตราเงินต่อไม้,
 จำนวนไม้ขาดทุนติดกัน, price_history ต่อเหรียญ, ค่าธรรมเนียม, circuit breaker, Decimal, graceful shutdown
@@ -204,15 +204,8 @@ HOUR3_VETO_PERCENT = -1.5        # ชม.3 ลงแรงกว่านี้
 # คะแนน: ชม.2 ขึ้นพอ +50, ย่อในกรอบ +30, สุทธิ 2 ชม.ยังบวก +20
 MIN_CONFIDENCE_TO_BUY = 100
 MAX_SPREAD_PERCENT = 0.53            # ไม่ซื้อถ้า (ask-bid)/mid กว้างเกินนี้ (%)
-GRADUAL_WINDOW_MINUTES = 60          # ดูย้อนหลังกี่นาทีเพื่อหาจังหวะขยับทีละนิดก่อนพุ่ง
-GRADUAL_BUCKET_MINUTES = 10          # แบ่งหน้าต่างเป็นช่วงละกี่นาที (60/10 = 6 ช่วง)
-GRADUAL_MIN_BUCKET_PERCENT = 0.03    # นับเป็น "ขยับขึ้น" ถ้าช่วงนั้นขึ้นอย่างน้อยเท่านี้
-GRADUAL_MAX_BUCKET_PERCENT = 0.5       # ช่วงไหนขึ้น/ลงแรงเกินนี้ = ไม่ใช่ขยับทีละนิดแล้ว
-GRADUAL_MIN_POSITIVE_RATIO = 0.7     # ต้องมีช่วงที่ขึ้นอย่างน้อยเท่านี้ % ของทั้งหมด
-GRADUAL_MIN_TOTAL_PERCENT = 0.6      # ← ปรับจาก 0.35 เป็น 0.6 (สูงกว่าค่าฟี 0.4% พอสมควร)
-GRADUAL_MAX_TOTAL_PERCENT = 2.5      # รวมทั้งหน้าต่างขึ้นเกินนี้ = สายไปแล้ว
-REVERSAL_WINDOW_MINUTES = 10         # ดูย้อนหลังกี่นาทีเพื่อจับราคาพลิกลง
-REVERSAL_BUCKET_MINUTES = 3.3        # แบ่งหน้าต่างเป็นช่วงละกี่นาที (15/5 = 3 ช่วง)
+REVERSAL_WINDOW_MINUTES = 10         # ดูย้อนหลัง 10 นาทีเพื่อจับราคาพลิกลง
+REVERSAL_BUCKET_MINUTES = 10 / 3     # แบ่ง 10 นาทีเป็น 3 ช่วง
 REVERSAL_MIN_BUCKET_DOWN_PERCENT = -0.12  # นับเป็น "ลง" ถ้าช่วงนั้นลงอย่างน้อยเท่านี้
 REVERSAL_MIN_DOWN_RATIO = 0.66       # ต้องมีช่วงที่ลงอย่างน้อยเท่านี้ของทั้งหมด (2 ใน 3)
 REVERSAL_MIN_TOTAL_PERCENT = -0.20   # รวมทั้งหน้าต่างต้องลงอย่างน้อยเท่านี้
@@ -267,87 +260,75 @@ def _first_book_price(levels):
     return None
 
 
-def parse_market_quote(data):
-    """
-    แปลงข้อมูลตลาดจาก InnovestX ให้เป็น:
-    bid, ask, last, mid, spread, spread_pct
-    รองรับ side=0/1 และ insideBidPrice/insideAskPrice
-    """
-    result = {
-        "bid": None,
-        "ask": None,
-        "last": None,
-        "mid": None,
-        "spread": None,
-        "spread_pct": None,
+def parse_market_quote(payload):
+    """แยก last / bid / offer จาก orderbook Level 2, ticker, หรือสมุดคำสั่งแบบเก่า"""
+    quote = {
+        "last": None, "bid": None, "ask": None,
+        "mid": None, "spread": None, "spread_pct": None,
     }
-    if not isinstance(data, dict):
-        return result
+    if not isinstance(payload, dict) or str(payload.get("code") or "") != "0000":
+        return quote
 
-    rows = data.get("data")
-    if isinstance(rows, dict):
-        rows = [rows]
-    if not isinstance(rows, list):
-        rows = []
+    data = payload.get("data")
+    rows = []
+    record = None
+    if isinstance(data, dict):
+        record = data
+        rows = [data]
+    elif isinstance(data, list):
+        rows = [row for row in data if isinstance(row, dict)]
+        record = rows[0] if rows else None
 
-    bids = []
-    asks = []
-
+    l2_bids, l2_asks = [], []
+    inside_bid = inside_ask = None
     for row in rows:
-        if not isinstance(row, dict):
-            continue
-        try:
-            price = float(row.get("price"))
-        except (TypeError, ValueError):
-            price = None
         side = row.get("side")
-        if price is not None:
+        px = _safe_float(row.get("price"))
+        if px is not None and px > 0:
             if side in (0, "0", "Buy", "BUY", "buy"):
-                bids.append(price)
+                l2_bids.append(px)
             elif side in (1, "1", "Sell", "SELL", "sell"):
-                asks.append(price)
+                l2_asks.append(px)
+        ib = _safe_float(row.get("insideBidPrice"))
+        ia = _safe_float(row.get("insideAskPrice"))
+        if ib is not None and ib > 0 and inside_bid is None:
+            inside_bid = ib
+        if ia is not None and ia > 0 and inside_ask is None:
+            inside_ask = ia
+        if quote["last"] is None:
+            for key in ("lastTradePrice", "last", "close", "lastPrice"):
+                val = _safe_float(row.get(key))
+                if val is not None and val > 0:
+                    quote["last"] = val
+                    break
 
-        # สำรองจาก Ticker (ถ้ามี)
-        if result["bid"] is None:
-            try:
-                inside_bid = float(row.get("insideBidPrice"))
-                if inside_bid > 0:
-                    result["bid"] = inside_bid
-            except (TypeError, ValueError):
-                pass
-        if result["ask"] is None:
-            try:
-                inside_ask = float(row.get("insideAskPrice"))
-                if inside_ask > 0:
-                    result["ask"] = inside_ask
-            except (TypeError, ValueError):
-                pass
+    book_bid = book_ask = None
+    if isinstance(record, dict):
+        book_bid = _first_book_price(record.get("bids") or record.get("bid") or [])
+        book_ask = _first_book_price(record.get("asks") or record.get("ask") or [])
 
-    if bids:
-        result["bid"] = max(bids)
-    if asks:
-        result["ask"] = min(asks)
+    if l2_bids:
+        quote["bid"] = max(l2_bids)
+    elif inside_bid is not None:
+        quote["bid"] = inside_bid
+    elif book_bid is not None:
+        quote["bid"] = book_bid
 
-    # lastTradePrice
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        try:
-            last = float(row.get("lastTradePrice"))
-            if last > 0:
-                result["last"] = last
-                break
-        except (TypeError, ValueError):
-            pass
+    if l2_asks:
+        quote["ask"] = min(l2_asks)
+    elif inside_ask is not None:
+        quote["ask"] = inside_ask
+    elif book_ask is not None:
+        quote["ask"] = book_ask
 
-    # คำนวณ mid, spread, spread_pct
-    if result["bid"] is not None and result["ask"] is not None:
-        result["mid"] = (result["bid"] + result["ask"]) / 2
-        result["spread"] = result["ask"] - result["bid"]
-        if result["mid"] > 0:
-            result["spread_pct"] = (result["spread"] / result["mid"]) * 100
-
-    return result
+    if quote["bid"] is not None and quote["ask"] is not None:
+        quote["mid"] = (quote["bid"] + quote["ask"]) / 2.0
+        quote["spread"] = quote["ask"] - quote["bid"]
+        if quote["mid"] > 0:
+            quote["spread_pct"] = (quote["spread"] / quote["mid"]) * 100
+    elif quote["bid"] or quote["ask"]:
+        quote["mid"] = quote["bid"] or quote["ask"]
+    return quote
 
 
 def parse_market_price(payload):
@@ -371,7 +352,7 @@ def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ag
     """ซื้อตอนขึ้นแล้วย่อ — ชม.2 เป็นขาขึ้น ชม.1 ย่อในกรอบ สุทธิ 2 ชม.ยังบวก
 
     ไม่ซื้อตอนชม.ล่าสุดยังพุ่ง (ไล่หัว) และไม่ซื้อถ้าย่อลึกจนเทรนด์พัง
-    ถ้ามีราคา 15 นาทีย้อนหลัง และยังลงต่อ จะรอปุ่มก่อน
+    ต้องมีราคา 15 นาทีย้อนหลัง และต้องไม่ลงต่อ (รอปุ่ม) ก่อนซื้อ
     """
     result = {
         "direction": None,
@@ -438,91 +419,23 @@ def evaluate_entry_signal(current_price, price_1h_ago, price_2h_ago, price_3h_ag
         return result
     confidence = 100
 
-    if price_15m_ago:
-        change_15m = _pct_change(current_price, price_15m_ago)
-        if change_15m is not None and change_15m < 0:
-            result["confidence"] = confidence
-            result["reason"] = "still_falling"
-            return result
+    if price_15m_ago is None:
+        result["confidence"] = confidence
+        result["reason"] = "waiting_15m"
+        return result
+    change_15m = _pct_change(current_price, price_15m_ago)
+    if change_15m is None:
+        result["confidence"] = confidence
+        result["reason"] = "waiting_15m"
+        return result
+    if change_15m < 0:
+        result["confidence"] = confidence
+        result["reason"] = "still_falling"
+        return result
 
     result["confidence"] = confidence
     result["should_buy"] = confidence >= MIN_CONFIDENCE_TO_BUY
     result["reason"] = None if result["should_buy"] else "weak"
-    return result
-
-
-def detect_gradual_climb(history, now=None, window_minutes=GRADUAL_WINDOW_MINUTES,
-                          bucket_minutes=GRADUAL_BUCKET_MINUTES):
-    """หาจังหวะราคาขยับขึ้นทีละนิดต่อเนื่อง (สะสมก่อนพุ่ง) แทนการรอยืนยันหลังขึ้นแรงไปแล้ว
-
-    แบ่งช่วงย้อนหลัง window_minutes เป็นบักเก็ตละ bucket_minutes นาที แล้วเช็คว่า:
-      - ไม่มีบักเก็ตไหนขึ้น/ลงแรงเกิน GRADUAL_MAX_BUCKET_PERCENT (ไม่ใช่พุ่ง/ร่วงพรวดเดียว)
-      - สัดส่วนบักเก็ตที่ "ขึ้น" (>= GRADUAL_MIN_BUCKET_PERCENT) มากพอ (กันสัญญาณหลอก)
-      - รวมทั้งหน้าต่างอยู่ในช่วง [GRADUAL_MIN_TOTAL_PERCENT, GRADUAL_MAX_TOTAL_PERCENT]
-        (ขยับจริง แต่ยังไม่สายเกินไป)
-    """
-    result = {"is_gradual": False, "reason": "no_data", "total_change": None, "buckets": []}
-    now = time.time() if now is None else now
-    history = trim_to_continuous_recent(history or [], now)
-    if not history:
-        return result
-
-    window_sec = window_minutes * 60
-    bucket_sec = bucket_minutes * 60
-    n_buckets = int(window_minutes // bucket_minutes)
-    if n_buckets < 2:
-        return result
-
-    if now - history[0][0] < window_sec:
-        result["reason"] = "waiting_history"
-        return result
-
-    def price_at(seconds_ago, tolerance=180):
-        target = now - seconds_ago
-        closest = min(history, key=lambda t: abs(t[0] - target))
-        if abs(closest[0] - target) > tolerance:
-            return None
-        return closest[1]
-
-    marks = []
-    for i in range(n_buckets + 1):
-        px = price_at(window_sec - i * bucket_sec)
-        if px is None:
-            result["reason"] = "gap"
-            return result
-        marks.append(px)
-
-    buckets = []
-    climbing = 0
-    for i in range(n_buckets):
-        pct = _pct_change(marks[i + 1], marks[i])
-        if pct is None:
-            result["reason"] = "gap"
-            return result
-        if abs(pct) > GRADUAL_MAX_BUCKET_PERCENT:
-            result["reason"] = "spike_bucket" if pct > 0 else "drop_bucket"
-            result["buckets"] = buckets + [pct]
-            return result
-        buckets.append(pct)
-        if pct >= GRADUAL_MIN_BUCKET_PERCENT:
-            climbing += 1
-
-    result["buckets"] = buckets
-    total_change = _pct_change(marks[-1], marks[0])
-    result["total_change"] = total_change
-
-    if climbing / n_buckets < GRADUAL_MIN_POSITIVE_RATIO:
-        result["reason"] = "uneven"
-        return result
-    if total_change is None or total_change < GRADUAL_MIN_TOTAL_PERCENT:
-        result["reason"] = "too_flat"
-        return result
-    if total_change > GRADUAL_MAX_TOTAL_PERCENT:
-        result["reason"] = "too_late"
-        return result
-
-    result["is_gradual"] = True
-    result["reason"] = None
     return result
 
 
@@ -531,8 +444,8 @@ def detect_momentum_reversal(history, now=None,
                               bucket_minutes=REVERSAL_BUCKET_MINUTES):
     """หาสัญญาณกลับตัวระยะสั้น ใช้ล็อกกำไรก่อน trailing % แบบเดิมจะทันตัด
 
-    กลับทิศจาก detect_gradual_climb: แบ่ง 15 นาทีเป็นช่วงละ 5 นาที
-    ถ้าส่วนใหญ่ลง และรวมลงพอ — ขายเหนือจุดคุ้มทุนได้เลย ไม่ต้องรอ trailing arm
+    แบ่ง 10 นาทีเป็น 3 ช่วง ถ้าส่วนใหญ่ลง และรวมลงพอ — ขายเหนือจุดคุ้มทุนได้เลย
+    ไม่ต้องรอ trailing arm
     """
     result = {"is_reversal": False, "reason": "no_data", "total_change": None, "buckets": []}
     now = time.time() if now is None else now
@@ -541,7 +454,7 @@ def detect_momentum_reversal(history, now=None,
         return result
     window_sec = window_minutes * 60
     bucket_sec = bucket_minutes * 60
-    n_buckets = int(window_minutes // bucket_minutes)
+    n_buckets = int(round(float(window_minutes) / float(bucket_minutes)))
     if n_buckets < 2 or now - history[0][0] < window_sec:
         result["reason"] = "waiting_history"
         return result
@@ -917,6 +830,7 @@ REASON_TH = {
     "shallow_pullback": f"ย่อยังไม่ถึง {MIN_PULLBACK_1H_PERCENT}% รอให้ย่อกว่านี้",
     "deep_pullback": f"ย่อลึกกว่า {MAX_PULLBACK_1H_PERCENT}% — เทรนด์อาจพัง ไม่ซื้อ",
     "still_falling": "ย่อต่ออยู่ รอปุ่มก่อนซื้อ",
+    "waiting_15m": "ยังไม่มีราคา 15 นาที — รอปุ่มก่อน ไม่ซื้อตอนยังไม่รู้ว่าลงต่อหรือไม่",
     "weak_trend": f"ชม.ก่อนหน้าขึ้นไม่ถึง {MIN_TREND_2H_PERCENT}% — ยังไม่ใช่ขาขึ้นชัด",
     "hour2_down": "ชม.ก่อนหน้าลง — ไม่มีขาขึ้นให้ย่อ",
     "weak_net": f"หลังย่อแล้ว สุทธิ 2 ชม. ยังไม่ถึง +{MIN_NET_2H_PERCENT}%",
@@ -925,12 +839,6 @@ REASON_TH = {
     "weak": "คะแนนยังไม่ถึงเกณฑ์",
     "waiting_history": "รอสะสมข้อมูล 2 ชั่วโมง",
     "unknown": "ยังประเมินไม่ได้",
-    "spike_bucket": "มีบางช่วงพุ่งแรงเกินไป — ไม่ใช่ขยับทีละนิดแล้ว",
-    "drop_bucket": "มีบางช่วงร่วงแรง — จังหวะยังไม่นิ่งพอ",
-    "uneven": "ขึ้นไม่สม่ำเสมอพอที่จะเรียกว่าขยับทีละนิด",
-    "too_flat": "ยังขยับน้อยเกินไป รอสัญญาณชัดกว่านี้",
-    "too_late": f"ขึ้นมาเกิน {GRADUAL_MAX_TOTAL_PERCENT}% ในชั่วโมงที่ผ่านมาแล้ว — สายเกินจังหวะขยับทีละนิด",
-    "no_data": "ข้อมูลไม่พอสำหรับเช็คจังหวะขยับทีละนิด",
 }
 
 
@@ -1980,12 +1888,12 @@ class InnovestXTradingBot:
 
     # ==================== Strategy ====================
     def analyze_trend(self, current_price):
-        """ประเมินเข้าซื้อ 2 ทาง: ยืนยันแล้ว (1-2ชม.) หรือขยับทีละนิดก่อนพุ่ง (แค่ 60 นาที) — ชม.3 ห้ามซื้อทั้งคู่"""
+        """ประเมินเข้าซื้อแบบขึ้นแล้วย่อ — ต้องมีประวัติต่อเนื่อง 2 ชม. ชม.3 ใช้แค่ห้ามซื้อ"""
         empty = {
             "ready": False, "should_buy": False, "direction": None, "confidence": 0,
             "change_1h": 0.0, "change_2h": None, "change_3h": None, "net_2h": None,
             "vetoed": False, "reason": "unknown", "elapsed": 0.0,
-            "entry_path": None, "gradual_reason": None,
+            "entry_path": None,
         }
         if current_price is None:
             empty["reason"] = "no_price"
@@ -1993,11 +1901,9 @@ class InnovestXTradingBot:
 
         empty["elapsed"] = history_elapsed_sec(self.state.get("price_history") or [])
 
-        # ขั้นต่ำที่ต้องมีคือ 60 นาที (พอสำหรับสูตรขยับทีละนิด) — ไม่ต้องรอครบ 2 ชม.แบบเดิมอีกแล้ว
-        min_needed_sec = GRADUAL_WINDOW_MINUTES * 60
-        if empty["elapsed"] < min_needed_sec:
+        if empty["elapsed"] < HISTORY_NEEDED_SEC:
             minutes = int(empty["elapsed"] // 60)
-            logger.info(f"[{self.symbol}] รอสะสมข้อมูลราคาต่อเนื่อง {minutes}/{GRADUAL_WINDOW_MINUTES} นาที")
+            logger.info(f"[{self.symbol}] รอสะสมข้อมูลราคาต่อเนื่อง {minutes}/120 นาที")
             empty["reason"] = "waiting_history"
             return empty
 
@@ -2010,7 +1916,6 @@ class InnovestXTradingBot:
             current_price, price_1h_ago, price_2h_ago, price_3h_ago,
             price_15m_ago=price_15m_ago,
         )
-        gradual = detect_gradual_climb(self.state.get("price_history") or [])
 
         hour3_veto = signal.get("change_3h") is not None and signal["change_3h"] < HOUR3_VETO_PERCENT
         should_buy = bool(signal["should_buy"]) and not hour3_veto
@@ -2028,19 +1933,13 @@ class InnovestXTradingBot:
             )
 
         confidence = signal["confidence"]
-
-        reason = None if should_buy else (
-            signal["reason"] if signal["reason"] not in (None, "unknown") else gradual["reason"]
-        )
-        gradual_reason_th = REASON_TH.get(gradual["reason"], gradual["reason"] or "")
+        reason = None if should_buy else signal["reason"]
         net_txt = f"{signal['net_2h']:+.2f}%" if signal["net_2h"] is not None else "n/a"
         h2_txt = f"{signal['change_2h']:+.2f}%" if signal["change_2h"] is not None else "n/a"
-        gradual_txt = f"{gradual['total_change']:+.2f}%" if gradual.get("total_change") is not None else "n/a"
 
         logger.info(
             f"[{self.symbol}] ขาขึ้นแล้วย่อ: {signal['direction'] or 'flat'} (คะแนน {signal['confidence']}%) "
-            f"ชม.1 {signal['change_1h']:+.2f}% ชม.2 {h2_txt} สุทธิ {net_txt} | "
-            f"ขยับทีละนิด 60นาที: {gradual_txt} ({'ผ่าน' if gradual['is_gradual'] else gradual_reason_th or 'ยังไม่ผ่าน'})"
+            f"ชม.1 {signal['change_1h']:+.2f}% ชม.2 {h2_txt} สุทธิ {net_txt}"
         )
         if should_buy:
             logger.info(f"[{self.symbol}] ผ่านเกณฑ์เข้าซื้อ — ขึ้นแล้วย่อ")
@@ -2052,7 +1951,7 @@ class InnovestXTradingBot:
             "confidence": confidence, "change_1h": signal["change_1h"], "change_2h": signal["change_2h"],
             "change_3h": signal["change_3h"], "net_2h": signal["net_2h"],
             "vetoed": signal["vetoed"] or hour3_veto, "reason": reason,
-            "entry_path": entry_path, "gradual_reason": gradual["reason"],
+            "entry_path": entry_path, "elapsed": empty["elapsed"],
         }
 
     def try_enter_position(self, current_price, available_slots=1):
@@ -2700,12 +2599,12 @@ def _render_card(label, value, sub="", value_class=""):
 
 
 def _trend_from_state(state):
-    """สูตรเดียวกับบอท: ยืนยันแล้ว (1-2ชม.) หรือขยับทีละนิดก่อนพุ่ง (60นาที) — ชม.3 ห้ามซื้อทั้งคู่"""
+    """สูตรเดียวกับบอท: ขึ้นแล้วย่อ ต้องมีประวัติต่อเนื่อง 2 ชม. — ชม.3 ห้ามซื้อ"""
     empty = {
         "direction": None, "confidence": 0, "current": None, "change_1h": 0.0,
         "change_2h": None, "change_3h": None, "net_2h": None, "elapsed": 0.0,
         "should_buy": False, "vetoed": False, "reason": "unknown",
-        "entry_path": None, "gradual_reason": None,
+        "entry_path": None,
     }
     history = trim_to_continuous_recent(state.get("price_history") or [])
     if not history:
@@ -2716,8 +2615,7 @@ def _trend_from_state(state):
     empty["current"] = current
     empty["elapsed"] = history_elapsed_sec(history, now)
 
-    min_needed_sec = GRADUAL_WINDOW_MINUTES * 60
-    if empty["elapsed"] < min_needed_sec:
+    if empty["elapsed"] < HISTORY_NEEDED_SEC:
         empty["reason"] = "waiting_history"
         return empty
 
@@ -2734,26 +2632,17 @@ def _trend_from_state(state):
     p15 = price_at(900)
 
     signal = evaluate_entry_signal(current, p1, p2, p3, price_15m_ago=p15)
-    gradual = detect_gradual_climb(history, now=now)
 
     hour3_veto = signal.get("change_3h") is not None and signal["change_3h"] < HOUR3_VETO_PERCENT
     should_buy = bool(signal["should_buy"]) and not hour3_veto
     entry_path = "pullback" if should_buy else None
 
-    confidence = signal["confidence"]
-
-    reason = None if should_buy else (
-        signal["reason"] if signal["reason"] not in (None, "unknown") else gradual["reason"]
-    )
-
     signal["current"] = current
     signal["elapsed"] = empty["elapsed"]
     signal["should_buy"] = should_buy
-    signal["confidence"] = confidence
     signal["vetoed"] = signal["vetoed"] or hour3_veto
-    signal["reason"] = reason
+    signal["reason"] = None if should_buy else signal["reason"]
     signal["entry_path"] = entry_path
-    signal["gradual_reason"] = gradual["reason"]
     return signal
 
 
@@ -3013,6 +2902,10 @@ def render_dashboard(watchlist, states_by_symbol, control, shared_risk):
             chips.append('<span class="chip up">ย่อแล้ว พร้อมซื้อ</span>')
         elif trend.get("reason") == "waiting_pullback":
             chips.append('<span class="chip">ขาขึ้น รอย่อ</span>')
+        elif trend.get("reason") == "still_falling":
+            chips.append('<span class="chip">ย่อต่อ รอปุ่ม</span>')
+        elif trend.get("reason") == "waiting_15m":
+            chips.append('<span class="chip">รอราคา 15 นาที</span>')
         elif trend.get("vetoed"):
             chips.append('<span class="chip down">ชม.3 ห้ามซื้อ</span>')
         if direction == "up":

@@ -122,6 +122,21 @@ class ParseMarketPriceTests(unittest.TestCase):
         }
         self.assertAlmostEqual(bot.parse_market_price(payload), 100.0)
 
+    def test_level2_side_rows(self):
+        payload = {
+            "code": "0000",
+            "data": [
+                {"side": 0, "price": "100.0"},
+                {"side": 1, "price": "102.0"},
+                {"lastTradePrice": "101.0"},
+            ],
+        }
+        quote = bot.parse_market_quote(payload)
+        self.assertAlmostEqual(quote["bid"], 100.0)
+        self.assertAlmostEqual(quote["ask"], 102.0)
+        self.assertAlmostEqual(quote["last"], 101.0)
+        self.assertAlmostEqual(bot.quote_mark_price(quote, "buy"), 102.0)
+
 
 class WatchlistTests(unittest.TestCase):
     def test_missing_uses_fallback(self):
@@ -159,8 +174,8 @@ class WatchlistTests(unittest.TestCase):
 
 class EntrySignalTests(unittest.TestCase):
     def test_buy_on_pullback_after_up_hour(self):
-        # ชม.2 +1.61%, ชม.1 -0.79%, สุทธิ +0.81%
-        sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 99.0)
+        # ชม.2 +1.61%, ชม.1 -0.79%, สุทธิ +0.81%, 15 นาทีเด้งขึ้น
+        sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 99.0, price_15m_ago=99.85)
         self.assertTrue(sig["should_buy"])
         self.assertEqual(sig["direction"], "up")
         self.assertEqual(sig["confidence"], 100)
@@ -194,6 +209,11 @@ class EntrySignalTests(unittest.TestCase):
         sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 99.0, price_15m_ago=100.4)
         self.assertFalse(sig["should_buy"])
         self.assertEqual(sig["reason"], "still_falling")
+
+    def test_missing_15m_waits_instead_of_buying(self):
+        sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 99.0)
+        self.assertFalse(sig["should_buy"])
+        self.assertEqual(sig["reason"], "waiting_15m")
 
     def test_bounce_15m_allows_buy(self):
         sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 99.0, price_15m_ago=99.85)
@@ -232,9 +252,9 @@ class OrderSafetyTests(unittest.TestCase):
 
     def test_price_tick_skips_near_duplicates(self):
         hist = [[1000.0, 100.0]]
-        self.assertFalse(bot.should_append_price_tick(hist, 1010.0, 100.02))  # ยังไม่ครบ 15 วิ และขยับน้อย
-        self.assertTrue(bot.should_append_price_tick(hist, 1016.0, 100.02))   # ครบช่วงแล้ว
-        self.assertTrue(bot.should_append_price_tick(hist, 1010.0, 100.20))  # ขยับ 0.2%
+        self.assertFalse(bot.should_append_price_tick(hist, 1006.0, 100.02))  # ยังไม่ครบ 7 วิ และขยับน้อย
+        self.assertTrue(bot.should_append_price_tick(hist, 1007.0, 100.02))   # ครบช่วงแล้ว
+        self.assertTrue(bot.should_append_price_tick(hist, 1003.0, 100.20))  # ขยับ 0.2%
 
     def test_sell_without_fill_price_stays_holding(self):
         b = bot.InnovestXTradingBot("k", "s", symbol="BTCTHB")
@@ -591,7 +611,7 @@ def _reversal_history(now, marks):
     """marks: ราคาที่แต่ละจุดของหน้าต่างกลับตัว (เก่า → ใหม่ รวมจุดเริ่ม) ตามค่าคงที่ปัจจุบัน"""
     window_sec = bot.REVERSAL_WINDOW_MINUTES * 60
     bucket_sec = bot.REVERSAL_BUCKET_MINUTES * 60
-    n = int(bot.REVERSAL_WINDOW_MINUTES // bot.REVERSAL_BUCKET_MINUTES)
+    n = int(round(bot.REVERSAL_WINDOW_MINUTES / bot.REVERSAL_BUCKET_MINUTES))
     if len(marks) != n + 1:
         raise AssertionError(f"need {n + 1} marks for current reversal window, got {len(marks)}")
     return [[now - window_sec + i * bucket_sec, marks[i]] for i in range(n + 1)]
@@ -845,6 +865,14 @@ class HistoryGapTests(unittest.TestCase):
         )
         self.assertIn("กำลังสะสมข้อมูลราคา", html)
         self.assertIn("รอข้อมูล", html)
+
+    def test_ninety_minutes_still_waiting_two_hours(self):
+        now = time.time()
+        hist = [[now - 5400 + i * 15, 100.0] for i in range(0, 360)]
+        trend = bot._trend_from_state({"status": "IDLE", "price_history": hist})
+        self.assertEqual(trend["reason"], "waiting_history")
+        self.assertGreater(trend["elapsed"], 5000)
+        self.assertLess(trend["elapsed"], 7200)
 
 
 class ControlPersistenceTests(unittest.TestCase):
