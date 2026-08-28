@@ -5,6 +5,7 @@ import types
 import unittest
 from unittest.mock import patch
 import os
+import base64
 
 
 def _install_mocks():
@@ -959,6 +960,70 @@ class WatchlistStillWorksTests(unittest.TestCase):
             bot._normalize_watchlist(["eththb", "ETHTHB", "solthb"], "BTCTHB"),
             ["ETHTHB", "SOLTHB"],
         )
+
+
+class StalePriceAlertTests(unittest.TestCase):
+    def _bot(self):
+        b = bot.InnovestXTradingBot("k", "s", symbol="BTCTHB")
+        b.save_state = lambda: None
+        b.save_market = lambda **k: None
+        return b
+
+    def test_skips_when_not_holding(self):
+        b = self._bot()
+        b.state["status"] = "IDLE"
+        b.state["price_history"] = [[time.time() - 400, 100.0]]
+        with patch.object(bot, "notify_telegram") as notify:
+            b._maybe_alert_stale_price()
+            notify.assert_not_called()
+
+    def test_skips_when_price_is_fresh(self):
+        b = self._bot()
+        b.state["status"] = "HOLDING"
+        b.state["price_history"] = [[time.time() - 10, 100.0]]
+        with patch.object(bot, "notify_telegram") as notify:
+            b._maybe_alert_stale_price()
+            notify.assert_not_called()
+
+    def test_alerts_once_then_cools_down(self):
+        b = self._bot()
+        b.state["status"] = "HOLDING"
+        b.state["price_history"] = [[time.time() - 400, 100.0]]
+        with patch.object(bot, "notify_telegram") as notify:
+            b._maybe_alert_stale_price()
+            b._maybe_alert_stale_price()
+            notify.assert_called_once()
+            self.assertIn("ราคาไม่อัปเดตมา", notify.call_args[0][0])
+
+
+class DashboardAuthTests(unittest.TestCase):
+    def _handler(self, auth_header=""):
+        handler = bot.HealthCheckHandler.__new__(bot.HealthCheckHandler)
+        handler.headers = {"Authorization": auth_header} if auth_header else {}
+        return handler
+
+    def test_open_when_password_unset(self):
+        handler = self._handler()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DASHBOARD_PASSWORD", None)
+            self.assertTrue(handler._check_auth())
+
+    def test_rejects_missing_header(self):
+        handler = self._handler()
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": "secret"}):
+            self.assertFalse(handler._check_auth())
+
+    def test_accepts_matching_basic_auth(self):
+        token = base64.b64encode(b"user:secret").decode("ascii")
+        handler = self._handler(f"Basic {token}")
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": "secret"}):
+            self.assertTrue(handler._check_auth())
+
+    def test_rejects_wrong_password(self):
+        token = base64.b64encode(b"user:wrong").decode("ascii")
+        handler = self._handler(f"Basic {token}")
+        with patch.dict(os.environ, {"DASHBOARD_PASSWORD": "secret"}):
+            self.assertFalse(handler._check_auth())
 
 
 if __name__ == "__main__":

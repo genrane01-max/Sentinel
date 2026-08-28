@@ -21,6 +21,7 @@ import time
 import uuid
 import hmac
 import hashlib
+import base64
 import json
 import os
 import re
@@ -215,7 +216,6 @@ REVERSAL_MIN_DOWN_RATIO = 0.66       # ต้องมีช่วงที่�
 REVERSAL_MIN_TOTAL_PERCENT = -0.20   # รวมทั้งหน้าต่างต้องลงอย่างน้อยเท่านี้
 REVERSAL_COOLDOWN_MINUTES = 10       # ขายด้วยสัญญาณกลับตัวแล้ว ห้ามซื้อเหรียญนี้คืนกี่นาที
 ORDER_SEND_PATH = "/api/v1/digital-asset/order/send"
-PENDING_ORDER_TTL_SEC = 600  # ล็อกกันยิงซ้ำอย่างน้อย 10 นาที — ห้ามปลดแค่เพราะหมดเวลาถ้ายังไม่เช็คพอร์ต
 RECENT_ORDER_LOOKBACK_SEC = 180
 MARKET_HISTORY_FLUSH_SEC = 15
 PRICE_TICK_MIN_INTERVAL_SEC = 10
@@ -806,7 +806,7 @@ def fetch_exchange_symbol_catalog(force=False):
         return cached
     api_key = os.environ.get("INVX_API_KEY")
     api_secret = os.environ.get("INVX_API_SECRET")
-    bot = next(iter(LIVE_BOTS.values()), None)
+    bot = next(iter(list(LIVE_BOTS.values())), None)
     res = None
     if bot is not None:
         res = bot.send_request("GET", "/api/v1/digital-asset/symbols")
@@ -1149,6 +1149,8 @@ class InnovestXTradingBot:
     MAX_RETRIES = 3
     FEE_ESTIMATE_PATH = "/api/v1/digital-asset/order/fee/inquiry"
     RECONCILE_INTERVAL_SEC = 300  # เช็ค state กับพอร์ตจริงซ้ำทุกกี่วิระหว่างบอทรันอยู่ (นอกเหนือจากตอน startup) — กันเคสขายเหรียญนอกบอทระหว่างที่บอทยังรันค้างอยู่
+    STALE_PRICE_ALERT_SEC = 300           # ราคานิ่งนานเท่านี้วิ ระหว่างถือของ ให้แจ้งเตือน
+    STALE_PRICE_ALERT_COOLDOWN_SEC = 900  # กันสแปม ห่างกันอย่างน้อยเท่านี้ค่อยแจ้งซ้ำ
 
     def __init__(self, api_key, api_secret, symbol="BTCTHB", base_currency="THB",
                  target_currency=None, trailing_stop_percent=None, stop_loss_percent=None):
@@ -1184,6 +1186,7 @@ class InnovestXTradingBot:
         install_shutdown_handlers()
 
         self._last_reconcile_ts = 0.0  # บังคับให้ reconcile รอบแรกใน loop ทำงานตามปกติ (ไม่ต้องรอครบ RECONCILE_INTERVAL_SEC)
+        self._last_stale_alert_ts = 0.0
 
         self.state = self.load_state()
         LIVE_BOTS[self.symbol] = self
@@ -2266,6 +2269,24 @@ class InnovestXTradingBot:
             self._record_price_tick(price)
         return price
 
+    def _maybe_alert_stale_price(self):
+        if self.state.get("status") != "HOLDING":
+            return
+        hist = self.state.get("price_history") or []
+        if not hist:
+            return
+        age = time.time() - hist[-1][0]
+        if age < self.STALE_PRICE_ALERT_SEC:
+            return
+        now = time.time()
+        if now - self._last_stale_alert_ts < self.STALE_PRICE_ALERT_COOLDOWN_SEC:
+            return
+        self._last_stale_alert_ts = now
+        notify_telegram(
+            f"⚠️ Sentinel {_display_symbol(self.symbol)} ราคาไม่อัปเดตมา "
+            f"{int(age // 60)} นาที ขณะยังถือเหรียญอยู่ — เช็ค log/การเชื่อมต่อ API ด่วน"
+        )
+
     def run_once(self):
         """รันหนึ่งรอบของ loop หลัก (ไม่ sleep) — เรียกจาก run() หรือจาก supervisor loop ใน __main__"""
         self.maybe_reconcile_periodically()
@@ -2273,6 +2294,7 @@ class InnovestXTradingBot:
 
         price = self.get_latest_price()
         if price is None:
+            self._maybe_alert_stale_price()
             return
         self._record_price_tick(price)
 
@@ -3107,12 +3129,42 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
 
+    def _check_auth(self):
+        required = os.environ.get("DASHBOARD_PASSWORD")
+        if not required:
+            return True
+        auth_header = self.headers.get("Authorization", "")
+        if not auth_header.startswith("Basic "):
+            return False
+        try:
+            decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+            _, _, pw = decoded.partition(":")
+        except Exception:
+            return False
+        try:
+            return hmac.compare_digest(pw.encode("utf-8"), required.encode("utf-8"))
+        except Exception:
+            return False
+
+    def _require_auth(self):
+        if self._check_auth():
+            return True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Sentinel"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write("ต้องใส่รหัสผ่าน".encode("utf-8"))
+        return False
+
     def do_GET(self):
         if self.path == "/health":
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write(b"OK")
+            return
+
+        if not self._require_auth():
             return
 
         try:
@@ -3148,7 +3200,9 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             required_password = os.environ.get("DASHBOARD_PASSWORD")
             given_password = fields.get("password", [""])[0]
 
-            if required_password and given_password != required_password:
+            if required_password and not hmac.compare_digest(
+                given_password.encode("utf-8"), required_password.encode("utf-8")
+            ):
                 self.send_response(403)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.end_headers()
@@ -3517,6 +3571,7 @@ if __name__ == "__main__":
                     try:
                         px = bot.poll_price()
                         if px is None:
+                            bot._maybe_alert_stale_price()
                             continue
                         if bot.state.get("status") == "HALTED":
                             bot.resume_from_halt()
@@ -3529,6 +3584,8 @@ if __name__ == "__main__":
                 for bot in bots.values():
                     try:
                         prices[bot.symbol] = bot.poll_price()
+                        if prices[bot.symbol] is None:
+                            bot._maybe_alert_stale_price()
                     except Exception:
                         logger.exception(f"[{bot.symbol}] ดึงราคาล้มเหลว")
                     time.sleep(0.2)
