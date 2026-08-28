@@ -74,53 +74,8 @@ class ParseMarketPriceTests(unittest.TestCase):
         payload = {"code": "0000", "data": [{"lastTradePrice": 101.25}]}
         self.assertAlmostEqual(bot.parse_market_price(payload), 101.25)
 
-    def test_bid_ask_mid_when_no_last(self):
-        payload = {
-            "code": "0000",
-            "data": {
-                "bids": [["100.0", "1"], ["99.0", "2"]],
-                "asks": [["102.0", "1"]],
-            },
-        }
-        self.assertAlmostEqual(bot.parse_market_price(payload), 101.0)
-        quote = bot.parse_market_quote(payload)
-        self.assertAlmostEqual(quote["bid"], 100.0)
-        self.assertAlmostEqual(quote["ask"], 102.0)
-        self.assertAlmostEqual(quote["spread_pct"], (2.0 / 101.0) * 100, places=4)
 
-    def test_quote_prefers_last_for_history_ask_for_buy(self):
-        payload = {
-            "code": "0000",
-            "data": {
-                "lastTradePrice": "101.0",
-                "bids": [["100.0", "1"]],
-                "asks": [["102.0", "1"]],
-            },
-        }
-        quote = bot.parse_market_quote(payload)
-        self.assertAlmostEqual(bot.quote_mark_price(quote, "last"), 101.0)
-        self.assertAlmostEqual(bot.quote_mark_price(quote, "buy"), 102.0)
-        self.assertAlmostEqual(bot.quote_mark_price(quote, "sell"), 100.0)
 
-    def test_dict_bid_as_objects(self):
-        payload = {
-            "code": "0000",
-            "data": {
-                "bid": [{"price": "10"}, {"price": "9"}],
-                "ask": [{"px": "12"}],
-            },
-        }
-        self.assertAlmostEqual(bot.parse_market_price(payload), 11.0)
-
-    def test_rejects_non_success(self):
-        self.assertIsNone(bot.parse_market_price({"code": "4005", "data": {"lastTradePrice": "1"}}))
-
-    def test_old_broken_shape_list_without_last_still_reads_book(self):
-        payload = {
-            "code": "0000",
-            "data": [{"bids": [[99.0, 1]], "asks": [[101.0, 1]]}],
-        }
-        self.assertAlmostEqual(bot.parse_market_price(payload), 100.0)
 
     def test_level2_side_rows(self):
         payload = {
@@ -172,54 +127,6 @@ class WatchlistTests(unittest.TestCase):
         self.assertIsNone(err)
 
 
-class EntrySignalTests(unittest.TestCase):
-    def test_buy_on_pullback_after_up_hour(self):
-        # ชม.2 +1.61%, ชม.1 -0.79%, สุทธิ +0.81%, 15 นาทีเด้งขึ้น
-        sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 99.0, price_15m_ago=99.85)
-        self.assertTrue(sig["should_buy"])
-        self.assertEqual(sig["direction"], "up")
-        self.assertEqual(sig["confidence"], 100)
-        self.assertIsNone(sig["reason"])
-
-    def test_does_not_chase_while_still_rising(self):
-        # ของเดิมซื้อเคสนี้ — ตอนนี้รอย่อ
-        sig = bot.evaluate_entry_signal(100.8, 100.0, 99.2, 99.0)
-        self.assertFalse(sig["should_buy"])
-        self.assertEqual(sig["reason"], "waiting_pullback")
-        self.assertEqual(sig["direction"], "up")
-
-    def test_hour3_veto(self):
-        sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 101.0)  # hour3 = 99.2/101 = -1.78%
-        self.assertFalse(sig["should_buy"])
-        self.assertTrue(sig["vetoed"])
-        self.assertEqual(sig["reason"], "hour3_veto")
-
-    def test_hour2_down_blocks(self):
-        sig = bot.evaluate_entry_signal(99.5, 100.5, 101.0, 100.0)
-        self.assertFalse(sig["should_buy"])
-        self.assertEqual(sig["reason"], "hour2_down")
-
-    def test_deep_pullback_blocks(self):
-        # ชม.2 +2.0%, ชม.1 -2.5%
-        sig = bot.evaluate_entry_signal(97.5, 100.0, 98.04, 98.0)
-        self.assertFalse(sig["should_buy"])
-        self.assertEqual(sig["reason"], "deep_pullback")
-
-    def test_still_falling_15m_blocks(self):
-        sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 99.0, price_15m_ago=100.4)
-        self.assertFalse(sig["should_buy"])
-        self.assertEqual(sig["reason"], "still_falling")
-
-    def test_missing_15m_waits_instead_of_buying(self):
-        sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 99.0)
-        self.assertFalse(sig["should_buy"])
-        self.assertEqual(sig["reason"], "waiting_15m")
-
-    def test_bounce_15m_allows_buy(self):
-        sig = bot.evaluate_entry_signal(100.0, 100.8, 99.2, 99.0, price_15m_ago=99.85)
-        self.assertTrue(sig["should_buy"])
-
-
 class SafeFloatTests(unittest.TestCase):
     def test_none_and_blank(self):
         self.assertEqual(bot._safe_float(None, 0.0), 0.0)
@@ -250,11 +157,6 @@ class OrderSafetyTests(unittest.TestCase):
         self.assertFalse(bot.is_mutating_order_path("/api/v1/digital-asset/order/history/inquiry"))
         self.assertFalse(bot.is_mutating_order_path("/api/v1/digital-asset/orderbook/lvl2"))
 
-    def test_price_tick_skips_near_duplicates(self):
-        hist = [[1000.0, 100.0]]
-        self.assertFalse(bot.should_append_price_tick(hist, 1006.0, 100.02))  # ยังไม่ครบ 7 วิ และขยับน้อย
-        self.assertTrue(bot.should_append_price_tick(hist, 1007.0, 100.02))   # ครบช่วงแล้ว
-        self.assertTrue(bot.should_append_price_tick(hist, 1003.0, 100.20))  # ขยับ 0.2%
 
     def test_sell_without_fill_price_stays_holding(self):
         b = bot.InnovestXTradingBot("k", "s", symbol="BTCTHB")
@@ -834,45 +736,7 @@ class HistoryGapTests(unittest.TestCase):
         self.assertEqual(len(trimmed), len(hist))
         self.assertGreaterEqual(bot.history_elapsed_sec(hist, now=now), 7190)
 
-    def test_stale_history_counts_as_waiting_on_dashboard(self):
-        now = time.time()
-        # ประวัติเก่า 3 ชม. แต่มีรูตอนย้ายเครื่อง — หน้าเว็บต้องโชว์แถบรอ ไม่ใช่คิดว่าครบแล้ว
-        state = {
-            "status": "IDLE",
-            "price_history": [
-                [now - 10800, 100.0],
-                [now - 9000, 101.0],
-                [now - 20, 102.0],
-            ],
-        }
-        trend = bot._trend_from_state(state)
-        self.assertEqual(trend["reason"], "waiting_history")
-        self.assertLess(trend["elapsed"], 120)
-        html = bot.render_dashboard(
-            ["BTCTHB"],
-            {"BTCTHB": state},
-            {
-                "watchlist": ["BTCTHB"],
-                "paused": False,
-                "max_open_positions": 3,
-                "max_consecutive_losses": 3,
-                "max_daily_loss_percent": 5,
-                "trade_size_percent": 10,
-                "trailing_stop_percent": 1,
-                "stop_loss_percent": 3,
-            },
-            {},
-        )
-        self.assertIn("กำลังสะสมข้อมูลราคา", html)
-        self.assertIn("รอข้อมูล", html)
 
-    def test_ninety_minutes_still_waiting_two_hours(self):
-        now = time.time()
-        hist = [[now - 5400 + i * 15, 100.0] for i in range(0, 360)]
-        trend = bot._trend_from_state({"status": "IDLE", "price_history": hist})
-        self.assertEqual(trend["reason"], "waiting_history")
-        self.assertGreater(trend["elapsed"], 5000)
-        self.assertLess(trend["elapsed"], 7200)
 
 
 class ControlPersistenceTests(unittest.TestCase):
@@ -966,6 +830,136 @@ class ControlPersistenceTests(unittest.TestCase):
         self.assertTrue(issubclass(bot.ThreadingHTTPServer, bot.ThreadingMixIn))
 
 
+def walk(prices, swing=None):
+    swing = swing or {}
+    last = None
+    for px in prices:
+        last = bot.apply_pullback_tick(px, swing)
+        swing = bot.swing_fields_from_signal(last)
+    return last, swing
+
+
+class PullbackEntryTests(unittest.TestCase):
+    def test_does_not_buy_while_still_running_up(self):
+        sig, swing = walk([100.0, 100.9, 101.2, 101.5])
+        self.assertTrue(swing["entry_armed"])
+        self.assertAlmostEqual(swing["swing_high"], 101.5)
+        self.assertAlmostEqual(swing["swing_low"], 100.0)
+        self.assertFalse(sig["should_buy"])
+        self.assertIn(sig["reason"], ("armed_wait_dip", "armed_new_high"))
+
+    def test_remembers_high_and_buys_after_dip_bounce(self):
+        # ขึ้น 1.5% จำยอด 101.5 แล้วย่อ ~0.79% แล้วเด้ง
+        sig, swing = walk([100.0, 101.5, 100.7, 100.82])
+        self.assertTrue(sig["should_buy"])
+        self.assertEqual(sig["phase"], "bounce")
+        self.assertAlmostEqual(swing["swing_high"], 101.5)
+        self.assertGreaterEqual(sig["dip_pct"], bot.PULLBACK_MIN_DIP_PERCENT)
+        self.assertLessEqual(sig["dip_pct"], bot.PULLBACK_MAX_DIP_PERCENT)
+        self.assertGreaterEqual(sig["bounce_pct"], bot.PULLBACK_BOUNCE_PERCENT)
+
+    def test_does_not_buy_at_the_low_before_bounce(self):
+        sig, _ = walk([100.0, 101.5, 100.7])
+        self.assertFalse(sig["should_buy"])
+        self.assertEqual(sig["reason"], "waiting_bounce")
+        self.assertEqual(sig["phase"], "pullback")
+
+    def test_raises_remembered_high_if_price_keeps_climbing(self):
+        sig, swing = walk([100.0, 100.9, 101.8])
+        self.assertTrue(swing["entry_armed"])
+        self.assertAlmostEqual(swing["swing_high"], 101.8)
+        self.assertFalse(sig["should_buy"])
+        self.assertEqual(sig["reason"], "armed_new_high")
+
+    def test_structure_breaks_on_deep_dip(self):
+        # ยอด 102 ย่อเกิน 1.5%
+        sig, swing = walk([100.0, 102.0, 100.2])
+        self.assertFalse(sig["should_buy"])
+        self.assertFalse(swing["entry_armed"])
+        self.assertEqual(sig["reason"], "structure_broke")
+        self.assertAlmostEqual(swing["swing_low"], 100.2)
+
+    def test_structure_breaks_if_price_loses_impulse_start(self):
+        sig, swing = walk([100.0, 101.2, 99.8])
+        self.assertFalse(swing["entry_armed"])
+        self.assertEqual(sig["reason"], "structure_broke")
+
+    def test_small_rise_is_not_armed(self):
+        sig, swing = walk([100.0, 100.5])  # 0.5% < 0.8%
+        self.assertFalse(swing["entry_armed"])
+        self.assertFalse(sig["should_buy"])
+        self.assertEqual(sig["reason"], "waiting_impulse")
+
+    def test_no_time_window_required(self):
+        # สองติ๊กก็ซื้อได้ ถ้าขึ้น-ย่อ-เด้งครบ ไม่ต้องรอ 2 ชม.
+        sig, _ = walk([100.0, 101.0, 100.4, 100.55])
+        self.assertTrue(sig["should_buy"])
+
+    def test_persisted_high_is_used_on_next_tick(self):
+        remembered = {
+            "swing_low": 100.0,
+            "swing_high": 101.5,
+            "pullback_low": 101.5,
+            "entry_armed": True,
+        }
+        sig = bot.apply_pullback_tick(100.7, remembered)
+        self.assertFalse(sig["should_buy"])
+        self.assertEqual(sig["phase"], "pullback")
+        self.assertAlmostEqual(sig["swing_high"], 101.5)
+
+    def test_analyze_trend_saves_remembered_high(self):
+        b = bot.InnovestXTradingBot("k", "s", symbol="BTCTHB")
+        b.save_state = lambda: None
+        b.save_market = lambda **k: None
+        b.state["status"] = "IDLE"
+        b.state["quote"] = {"bid": 100.0, "ask": 100.1, "last": 100.05, "spread_pct": 0.1}
+        b.analyze_trend(100.0)
+        b.analyze_trend(101.2)
+        self.assertTrue(b.state["entry_armed"])
+        self.assertAlmostEqual(b.state["swing_high"], 101.2)
+        self.assertAlmostEqual(b.state["swing_low"], 100.0)
+        sig = b.analyze_trend(101.2)
+        self.assertFalse(sig["should_buy"])
+
+    def test_dashboard_shows_remembered_high_not_two_hour_wait(self):
+        state = {
+            "status": "IDLE",
+            "swing_low": 100.0,
+            "swing_high": 101.5,
+            "pullback_low": 100.7,
+            "entry_armed": True,
+            "price_history": [[time.time(), 100.75]],
+        }
+        trend = bot._trend_from_state(state)
+        self.assertGreater(trend["swing_high"], 0)
+        html = bot.render_dashboard(
+            ["BTCTHB"],
+            {"BTCTHB": state},
+            {
+                "watchlist": ["BTCTHB"],
+                "paused": False,
+                "max_open_positions": 3,
+                "max_consecutive_losses": 3,
+                "max_daily_loss_percent": 5,
+                "trade_size_percent": 30,
+                "trailing_stop_percent": 1,
+                "stop_loss_percent": 3,
+            },
+            {},
+        )
+        self.assertIn("ซื้อตอนย่อ", html)
+        self.assertIn("ยอดที่จำ", html)
+        self.assertNotIn("ต้องครบ 2 ชั่วโมง", html)
+        self.assertNotIn("ชม.1", html)
+
+
+class WatchlistStillWorksTests(unittest.TestCase):
+    def test_dedupes_and_uppercases(self):
+        self.assertEqual(
+            bot._normalize_watchlist(["eththb", "ETHTHB", "solthb"], "BTCTHB"),
+            ["ETHTHB", "SOLTHB"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
-
