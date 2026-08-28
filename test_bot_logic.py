@@ -738,6 +738,93 @@ class HistoryGapTests(unittest.TestCase):
         self.assertGreaterEqual(bot.history_elapsed_sec(hist, now=now), 7190)
 
 
+class SwingGapResetTests(unittest.TestCase):
+    def _bot(self):
+        b = bot.InnovestXTradingBot("k", "s", symbol="BTCTHB")
+        b.save_state = lambda: None
+        b.save_market = lambda **k: None
+        return b
+
+    def test_resets_when_trimmed_history_is_empty(self):
+        b = self._bot()
+        b.state["swing_low"] = 100.0
+        b.state["swing_high"] = 102.0
+        b.state["pullback_low"] = 101.0
+        b.state["entry_armed"] = True
+        b._reset_swing_if_gap(3, [], context="test")
+        self.assertFalse(b.state["entry_armed"])
+        self.assertEqual(b.state["swing_low"], 0.0)
+        self.assertEqual(b.state["swing_high"], 0.0)
+        self.assertEqual(b.state["pullback_low"], 0.0)
+
+    def test_does_not_reset_when_recent_segment_survives(self):
+        b = self._bot()
+        b.state["swing_low"] = 100.0
+        b.state["entry_armed"] = True
+        b._reset_swing_if_gap(10, [[time.time(), 101.0]])
+        self.assertTrue(b.state["entry_armed"])
+        self.assertEqual(b.state["swing_low"], 100.0)
+
+    def test_does_not_reset_when_there_was_no_history(self):
+        b = self._bot()
+        b.state["swing_low"] = 100.0
+        b.state["entry_armed"] = True
+        b._reset_swing_if_gap(0, [])
+        self.assertTrue(b.state["entry_armed"])
+        self.assertEqual(b.state["swing_low"], 100.0)
+
+    def test_record_tick_resets_after_long_outage(self):
+        b = self._bot()
+        now = time.time()
+        b.state["price_history"] = [[now - 700, 100.0], [now - 680, 100.5]]
+        b.state["swing_low"] = 100.0
+        b.state["swing_high"] = 101.5
+        b.state["entry_armed"] = True
+        b._record_price_tick(102.0)
+        self.assertFalse(b.state["entry_armed"])
+        self.assertEqual(b.state["swing_low"], 0.0)
+        self.assertEqual(b.state["swing_high"], 0.0)
+        self.assertEqual(b.state["price_history"][-1][1], 102.0)
+
+    def test_record_tick_keeps_swing_if_history_still_fresh(self):
+        b = self._bot()
+        now = time.time()
+        b.state["price_history"] = [[now - 30, 100.0]]
+        b.state["swing_low"] = 100.0
+        b.state["entry_armed"] = True
+        b._record_price_tick(100.2)
+        self.assertTrue(b.state["entry_armed"])
+        self.assertEqual(b.state["swing_low"], 100.0)
+
+    def test_load_market_resets_when_saved_history_is_stale(self):
+        b = self._bot()
+        b.state["swing_low"] = 100.0
+        b.state["swing_high"] = 101.5
+        b.state["entry_armed"] = True
+        now = time.time()
+        stale = [[now - 2000, 100.0], [now - 1800, 101.0]]
+        with patch.object(bot, "market_ref") as ref:
+            ref.return_value.get.return_value = {"price_history": stale, "quote": {}}
+            b.load_market()
+        self.assertFalse(b.state["entry_armed"])
+        self.assertEqual(b.state["swing_low"], 0.0)
+        self.assertEqual(b.state["swing_high"], 0.0)
+        self.assertEqual(b.state["price_history"], [])
+
+    def test_load_market_keeps_swing_if_recent_history_survives(self):
+        b = self._bot()
+        b.state["swing_low"] = 100.0
+        b.state["entry_armed"] = True
+        now = time.time()
+        hist = [[now - 30, 100.0], [now - 15, 100.4]]
+        with patch.object(bot, "market_ref") as ref:
+            ref.return_value.get.return_value = {"price_history": hist, "quote": {}}
+            b.load_market()
+        self.assertTrue(b.state["entry_armed"])
+        self.assertEqual(b.state["swing_low"], 100.0)
+        self.assertEqual(len(b.state["price_history"]), 2)
+
+
 
 
 class ControlPersistenceTests(unittest.TestCase):
@@ -866,7 +953,7 @@ class PullbackEntryTests(unittest.TestCase):
         self.assertEqual(sig["phase"], "pullback")
 
     def test_raises_remembered_high_if_price_keeps_climbing(self):
-        sig, swing = walk([100.0, 100.9, 101.8])
+        sig, swing = walk([100.0, 101.3, 101.8])
         self.assertTrue(swing["entry_armed"])
         self.assertAlmostEqual(swing["swing_high"], 101.8)
         self.assertFalse(sig["should_buy"])
@@ -892,18 +979,18 @@ class PullbackEntryTests(unittest.TestCase):
         self.assertEqual(sig["reason"], "waiting_impulse")
 
     def test_history_low_is_impulse_origin_before_surge(self):
-        # บอทเพิ่งเริ่มเฝ้าตอนราคา 100.9 แต่ประวัติมีจุดถูก 100 ก่อนพุ่ง
+        # บอทเพิ่งเริ่มเฝ้าตอนราคา 101.3 แต่ประวัติมีจุดถูก 100 ก่อนพุ่ง
         hist = [[1, 100.0], [2, 100.3], [3, 100.6]]
-        sig = bot.apply_pullback_tick(100.9, {}, history=hist)
+        sig = bot.apply_pullback_tick(101.3, {}, history=hist)
         self.assertAlmostEqual(sig["swing_low"], 100.0)
         self.assertTrue(sig["entry_armed"])
-        self.assertAlmostEqual(sig["swing_high"], 100.9)
+        self.assertAlmostEqual(sig["swing_high"], 101.3)
         self.assertGreaterEqual(sig["impulse_pct"], bot.PULLBACK_MIN_IMPULSE_PERCENT)
 
     def test_history_low_does_not_raise_trough(self):
         # จุดต่ำที่จำไว้ถูกกว่าประวัติ — ต้องไม่ถูกดึงขึ้น
         hist = [[1, 101.0], [2, 101.2]]
-        sig = bot.apply_pullback_tick(101.1, {"swing_low": 100.0}, history=hist)
+        sig = bot.apply_pullback_tick(101.3, {"swing_low": 100.0}, history=hist)
         self.assertAlmostEqual(sig["swing_low"], 100.0)
         self.assertTrue(sig["entry_armed"])
 
@@ -959,7 +1046,7 @@ class PullbackEntryTests(unittest.TestCase):
 
     def test_no_time_window_required(self):
         # สองติ๊กก็ซื้อได้ ถ้าขึ้น-ย่อ-เด้งครบ ไม่ต้องรอ 2 ชม.
-        sig, _ = walk([100.0, 101.0, 100.4, 100.55])
+        sig, _ = walk([100.0, 101.3, 100.6, 100.75])
         self.assertTrue(sig["should_buy"])
 
     def test_persisted_high_is_used_on_next_tick(self):

@@ -1249,6 +1249,20 @@ class InnovestXTradingBot:
         self.load_market()
         return self.state
 
+    def _reset_swing_if_gap(self, raw_len, trimmed_hist, context=""):
+        """ล้างจุดที่ 1 (จุดต่ำก่อนพุ่ง) และยอดที่จำไว้ ถ้าข้อมูลราคาขาดช่วงจนไม่ต่อเนื่องถึงปัจจุบัน
+        เงื่อนไข: มีข้อมูลเดิมอยู่ (raw_len > 0) แต่ trim แล้วเหลือว่างเปล่า
+        (แปลว่าจุดล่าสุดที่มีอยู่ก็เก่าเกิน HISTORY_GAP_BREAK_SEC จาก 'ตอนนี้' แล้ว)
+        """
+        if raw_len and not trimmed_hist:
+            if self.state.get("entry_armed") or self.state.get("swing_low") or self.state.get("swing_high"):
+                self.state.update(dict(SWING_RESET))
+                logger.info(
+                    f"[{self.symbol}] ราคาขาดช่วง{context} — ล้างยอด/จุดต่ำที่จำไว้ "
+                    f"เริ่มจับจุดที่ 1 (จุดต่ำก่อนพุ่ง) ใหม่จากราคาปัจจุบัน"
+                )
+                self.save_state()
+
     def load_market(self):
         """โหลด bid/offer + ประวัติราคาจากฐานที่ 2 (หรือฐานหลักถ้ายังไม่เพิ่ม DB2)"""
         try:
@@ -1268,6 +1282,7 @@ class InnovestXTradingBot:
                 f"[{self.symbol}] ทิ้งประวัติราคาที่ขาดช่วง {raw_len - len(hist)} จุด "
                 f"— เริ่มสะสมใหม่ (แถบรอ 2 ชม. จะกลับมา)"
             )
+        self._reset_swing_if_gap(raw_len, hist, context="ตั้งแต่บอทออฟไลน์/reconnect")
         self.state["price_history"] = hist
         if quote:
             self.state["quote"] = quote
@@ -1387,7 +1402,10 @@ class InnovestXTradingBot:
 
     def _record_price_tick(self, price):
         now = time.time()
-        hist = trim_to_continuous_recent(self.state.get("price_history") or [], now)
+        raw_hist = self.state.get("price_history") or []
+        raw_len = len(raw_hist)
+        hist = trim_to_continuous_recent(raw_hist, now)
+        self._reset_swing_if_gap(raw_len, hist, context="ระหว่างบอทรันอยู่ (ดึงราคาไม่ได้นานเกิน 10 นาที)")
         if should_append_price_tick(hist, now, price):
             hist.append([now, price])
             cutoff = now - HISTORY_KEEP_SEC
